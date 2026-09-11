@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { countLoggableMessages, formatSpan, isCompactionReplacement, isLoggableMessage } from '../src/collector.js'
+import { countLoggableMessages, formatDuration, formatSpan, isCompactionReplacement, isLoggableMessage } from '../src/collector.js'
 
 const NOW = new Date('2025-09-09T12:00:00Z')
 
@@ -67,9 +67,10 @@ test('formatSpan attaches a collapsed tool ledger to assistant turns', () => {
   ]
   const [out] = formatSpan(events, { now: NOW })
   assert.match(out.markdown, /## Tool Calls/)
-  // Two identical grep rows collapse into one with a counter.
-  assert.match(out.markdown, /`grep` — ✅ ok ×2/)
-  assert.match(out.markdown, /`bash` — ❌ Error \(ENOENT\)/)
+  // Two identical grep rows collapse into one with a counter and a total time.
+  assert.match(out.markdown, /`grep` ×2 — ✅ 0ms total/)
+  assert.match(out.markdown, /`bash` — ❌ 0ms — Error \(ENOENT\) — missing/)
+  assert.ok(!out.markdown.includes('✅ ok'), 'a successful call\'s output is not stored')
 })
 
 test('formatSpan caps long assistant text', () => {
@@ -163,10 +164,10 @@ test('each assistant message carries only its own step\'s tool ledger', () => {
     ev('step/end', 8, { turn: 1, step: 2 }),
   ]
   const [first, second] = formatSpan(events, { now: NOW })
-  assert.match(first.markdown, /`grep` — ✅ found a/)
-  assert.ok(!first.markdown.includes('read b'), 'step 2 tools do not leak into step 1')
-  assert.match(second.markdown, /`read` — ✅ read b/)
-  assert.ok(!second.markdown.includes('found a'), 'step 1 tools do not leak into step 2')
+  assert.match(first.markdown, /1\. `grep` — ✅/)
+  assert.ok(!first.markdown.includes('`read`'), 'step 2 tools do not leak into step 1')
+  assert.match(second.markdown, /1\. `read` — ✅/)
+  assert.ok(!second.markdown.includes('`grep`'), 'step 1 tools do not leak into step 2')
 })
 
 test('a compaction replacement is not counted as tool activity', () => {
@@ -180,9 +181,10 @@ test('a compaction replacement is not counted as tool activity', () => {
     ev('tool/result', 14, { turn: 4, step: 1, message: { source: { callId: 'c' }, content: [{ type: 'text', text: 'pruned copy' }] } }),
   ]
   const [entry] = formatSpan(events, { now: NOW })
-  assert.match(entry.markdown, /real result/)
-  assert.ok(!entry.markdown.includes('pruned copy'))
-  assert.ok(!entry.markdown.includes('×2'), 'not collapsed with its own copy either')
+  const ledger = entry.markdown.split('## Tool Calls')[1]
+  assert.match(ledger, /1\. `grep` — ✅/)
+  assert.ok(!/\n2\. /.test(ledger), 'the copy adds no second row')
+  assert.ok(!ledger.includes('×2'), 'nor is it counted into the first')
 })
 
 test('a replacement that opens the span is recognised through the event before it', () => {
@@ -205,4 +207,51 @@ test('user messages are capped, and redacted before the cut', () => {
   assert.match(entry.markdown, /\[\.\.\.truncated \d+ chars\]/)
   assert.ok(!entry.markdown.includes('sk-AAAA'), 'no secret fragment survives the cut')
   assert.ok(entry.markdown.length < 1400)
+})
+
+test('the ledger records what was called, how long, and whether it worked — never the output', () => {
+  // The hypatia-memory protocol: "never raw outputs". Output excerpts were 84% of
+  // all stored message bytes, mostly file contents from `read`.
+  const t0 = new Date('2025-09-09T10:00:00').getTime()
+  const events = [
+    ev('assistant/message', 1, { turn: 1, step: 1, message: { content: [
+      { type: 'text', text: 'checking' },
+      { type: 'tool-call', id: 'r1', name: 'read', arguments: '{}' },
+    ] } }, t0),
+    ev('tool/call', 2, { turn: 1, step: 1, callId: 'r1', name: 'read' }, t0),
+    ev('tool/result', 3, { turn: 1, step: 1, message: { source: { callId: 'r1' }, content: [
+      { type: 'tool-result', toolCallId: 'r1', content: [{ type: 'text', text: 'FILE CONTENTS line 1\nline 2' }] },
+    ] } }, t0 + 340),
+    ev('tool/call', 4, { turn: 1, step: 1, callId: 'r2', name: 'read' }, t0 + 400),
+    ev('tool/result', 5, { turn: 1, step: 1, message: { source: { callId: 'r2' }, content: [{ type: 'text', text: 'more file text' }] } }, t0 + 1400),
+    ev('tool/call', 6, { turn: 1, step: 1, callId: 'b1', name: 'bash' }, t0 + 1500),
+    ev('tool/result', 7, { turn: 1, step: 1, error: { name: 'Error', code: 'ENOENT' }, message: { source: { callId: 'b1' }, content: [
+      { type: 'text', text: 'Error: no such file\n    at foo (x.js:1:1)' },
+    ] } }, t0 + 3500),
+  ]
+  const [entry] = formatSpan(events, { now: NOW })
+  const ledger = entry.markdown.split('## Tool Calls')[1]
+  assert.match(ledger, /1\. `read` ×2 — ✅ 1\.3s total/)
+  assert.match(ledger, /2\. `bash` — ❌ 2\.0s — Error \(ENOENT\) — Error: no such file$/m)
+  assert.ok(!entry.markdown.includes('FILE CONTENTS') && !entry.markdown.includes('more file text'), 'no output stored')
+  assert.ok(!entry.markdown.includes(' at foo'), 'stack frames stripped from the error line')
+  assert.match(entry.markdown, /## Content\nchecking\n/)
+  assert.ok(!entry.markdown.includes('[tool-call]'), 'no placeholder for the call itself')
+})
+
+test('a step that only calls tools says so instead of storing placeholders', () => {
+  const events = [
+    ev('assistant/message', 1, { turn: 1, step: 1, message: { content: [{ type: 'tool-call', id: 'g', name: 'grep', arguments: '{}' }] } }),
+    ev('tool/call', 2, { turn: 1, step: 1, callId: 'g', name: 'grep' }),
+    ev('tool/result', 3, { turn: 1, step: 1, message: { source: { callId: 'g' }, content: [] } }),
+  ]
+  const [entry] = formatSpan(events, { now: NOW })
+  assert.match(entry.markdown, /## Content\n\(tool calls only\)/)
+  assert.ok(!entry.markdown.includes('[tool-call]'))
+})
+
+test('formatDuration stays human-scale', () => {
+  assert.equal(formatDuration(340), '340ms')
+  assert.equal(formatDuration(2400), '2.4s')
+  assert.equal(formatDuration(192_000), '3m12s')
 })

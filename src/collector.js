@@ -408,7 +408,13 @@ export function formatSpan(events, policy = {}) {
   // A step is one model call plus the tools it requested, so a step is exactly
   // what one assistant message's ledger should cover. Keying by turn instead
   // hung the whole turn's tool activity on every assistant message in it.
-  /** @type {Map<string, Array<{name: string, line: string}>>} */
+  //
+  // The ledger records what was called, how long it took and whether it
+  // succeeded — never what it returned (the hypatia-memory protocol: "never raw
+  // outputs"). Output excerpts were 84% of all stored message bytes, mostly
+  // file paths and file contents from `read`, and they made unrelated keyword
+  // searches match raw chat logs through text nobody had written.
+  /** @type {Map<string, Array<{name: string, ok: boolean, ms: number | undefined, error: string | undefined}>>} */
   const ledgerByStep = new Map()
   if (toolLedger) {
     for (const event of events) {
@@ -417,17 +423,19 @@ export function formatSpan(events, policy = {}) {
       const callId = event.data?.message?.source?.callId
       const call = callId === undefined ? undefined : bySeq.get(findCallSeq(events, callId))
       const name = call?.data?.name ?? 'tool'
-      const error = event.data?.error
-      let line
-      if (error !== undefined) {
-        line = `❌ ${error.name}${error.code ? ` (${error.code})` : ''} — ${oneLineError(flattenToolResult(event))}`
-      } else {
-        const text = flattenToolResult(event)
-        line = text.trim() === '' ? '✅' : `✅ ${oneLineError(text)}`
-      }
+      const failure = event.data?.error
+      // A failure keeps one line of what went wrong: that is the part worth
+      // remembering, and the protocol asks for it.
+      const detail = failure === undefined ? '' : oneLineError(flattenToolResult(event))
+      const error = failure === undefined
+        ? undefined
+        : `${failure.name}${failure.code ? ` (${failure.code})` : ''}${detail === '' ? '' : ` — ${detail}`}`
+      const ms = typeof call?.time === 'number' && typeof event.time === 'number' && event.time >= call.time
+        ? event.time - call.time
+        : undefined
       const key = stepKey(event)
       const list = ledgerByStep.get(key) ?? []
-      list.push({ name, line })
+      list.push({ name, ok: failure === undefined, ms, error })
       ledgerByStep.set(key, list)
     }
   }
@@ -459,13 +467,15 @@ export function formatSpan(events, policy = {}) {
     if (role === 'assistant') {
       sections.push('## Turn', String(event.data?.turn ?? 0), '')
     }
-    sections.push('## Content', redacted + (interrupted ? '\n\n[turn interrupted mid-stream]' : ''))
+    const ledger = role === 'assistant' ? ledgerByStep.get(stepKey(event)) : undefined
+    const hasLedger = ledger !== undefined && ledger.length > 0
+    // A step that only called tools has no text of its own; say so rather than
+    // leave an empty section.
+    const body = redacted.trim() === '' && hasLedger ? '(tool calls only)' : redacted
+    sections.push('## Content', body + (interrupted ? '\n\n[turn interrupted mid-stream]' : ''))
 
-    const ledger = ledgerByStep.get(stepKey(event))
-    if (role === 'assistant' && ledger !== undefined && ledger.length > 0) {
-      // Collapse repeated identical tool lines into `name ×N`.
-      const collapsed = collapseLedger(ledger)
-      sections.push('', '## Tool Calls', ...collapsed.map((entry, i) => `${i + 1}. \`${entry.name}\` — ${entry.line}`))
+    if (hasLedger) {
+      sections.push('', '## Tool Calls', ...renderLedger(ledger))
     }
 
     const markdown = sections.join('\n')
@@ -509,19 +519,37 @@ function findCallSeq(events, callId) {
   return -1
 }
 
-/** Collapse consecutive identical ledger entries into one `×N` row. */
-function collapseLedger(ledger) {
-  const out = []
+/** Human-scale duration: `340ms`, `2.4s`, `3m12s`. */
+export function formatDuration(ms) {
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  const minutes = Math.floor(ms / 60_000)
+  return `${minutes}m${Math.round((ms - minutes * 60_000) / 1000)}s`
+}
+
+/**
+ * Render one step's ledger. Consecutive calls of the same tool with the same
+ * outcome collapse into one numbered row carrying a count and their total
+ * time; a failure keeps its one-line error.
+ *
+ *   1. `read` ×5 — ✅ 1.2s total
+ *   2. `bash` — ❌ 2.0s — Error (ENOENT) — no such file
+ */
+function renderLedger(ledger) {
+  const rows = []
   for (const entry of ledger) {
-    const prev = out[out.length - 1]
-    if (prev !== undefined && prev.name === entry.name && prev.line === entry.line) {
+    const prev = rows[rows.length - 1]
+    if (prev !== undefined && prev.name === entry.name && prev.ok === entry.ok && prev.error === entry.error) {
       prev.count += 1
+      prev.ms = prev.ms === undefined || entry.ms === undefined ? undefined : prev.ms + entry.ms
     } else {
-      out.push({ ...entry, count: 1 })
+      rows.push({ ...entry, count: 1 })
     }
   }
-  return out.map((e) => ({
-    name: e.name,
-    line: e.count > 1 ? `${e.line} ×${e.count}` : e.line,
-  }))
+  return rows.map((row, i) => {
+    const times = row.count > 1 ? ` ×${row.count}` : ''
+    const took = row.ms === undefined ? '' : ` ${formatDuration(row.ms)}${row.count > 1 ? ' total' : ''}`
+    const tail = row.ok ? '' : ` — ${row.error}`
+    return `${i + 1}. \`${row.name}\`${times} — ${row.ok ? '✅' : '❌'}${took}${tail}`
+  })
 }

@@ -216,7 +216,8 @@ export function estimateTokens(text) {
 
 /**
  * Flatten a session ContentBlock[] to plain text for logging: text blocks
- * verbatim, images marked, other block types summarized by their type name.
+ * verbatim, images marked, tool-call blocks dropped, other block types
+ * summarized by their type name.
  *
  * `tool-result` blocks nest the real payload one level down (a ToolResultBlock
  * carries its own ContentBlock[]), so they are recursed into rather than
@@ -234,6 +235,10 @@ export function blocksToText(blocks) {
     else if (block.type === 'image') parts.push('[image]')
     else if (block.type === 'thinking') parts.push(`[thinking: ${String(block.text ?? '').slice(0, 200)}]`)
     else if (block.type === 'tool-result') parts.push(blocksToText(block.content ?? []))
+    // A tool-call block is the model asking for a tool, not something it said.
+    // Rendered as `[tool-call]` it filled the content of half the stored
+    // assistant entries with placeholders; the ledger already lists the calls.
+    else if (block.type === 'tool-call') continue
     else parts.push(`[${block.type}]`)
   }
   return parts.join('\n')

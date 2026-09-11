@@ -161,6 +161,18 @@ export function createHypatiaCli(ctx, config) {
     }
   }
 
+  /**
+   * Whether stdout is hypatia's empty-result sentinel.
+   *
+   * The sentinel must be the WHOLE output. Testing for the phrase anywhere
+   * discarded entire result sets whenever one returned entry merely contained
+   * it — and stored tool output did: a logged search that found nothing reads
+   * "No results found." in the middle of an otherwise normal row.
+   */
+  function isEmptyResult(stdout) {
+    return stdout.trim() === 'No results found.'
+  }
+
   /** Parse a pretty-JSON stdout payload, tolerating trailing whitespace. */
   function parseJson(stdout, what) {
     try {
@@ -227,7 +239,7 @@ export function createHypatiaCli(ctx, config) {
      */
     async search(query, { catalog = 'knowledge', limit = 5, shelf = 'default' } = {}) {
       const { stdout } = await runOk(['search', query, '-c', catalog, '--limit', String(limit), '--shelf', shelf])
-      if (stdout.includes('No results found.')) return []
+      if (isEmptyResult(stdout)) return []
       const parsed = parseJson(stdout, 'search')
       return Array.isArray(parsed) ? parsed : []
     },
@@ -239,7 +251,7 @@ export function createHypatiaCli(ctx, config) {
      */
     async similar(query, { target = 'knowledge', limit = 5, shelf = 'default' } = {}) {
       const { stdout } = await runOk(['similar', query, '-t', target, '--limit', String(limit), '--shelf', shelf])
-      if (stdout.includes('No results found.')) return []
+      if (isEmptyResult(stdout)) return []
       const parsed = parseJson(stdout, 'similar')
       return Array.isArray(parsed) ? parsed : []
     },
@@ -250,6 +262,9 @@ export function createHypatiaCli(ctx, config) {
      */
     async query(jse, { shelf = 'default' } = {}) {
       const { stdout } = await runOk(['query', jse, '--shelf', shelf])
+      // An empty query prints the same sentinel as search; without this check it
+      // surfaced as an "unparseable query output" error.
+      if (isEmptyResult(stdout)) return []
       const parsed = parseJson(stdout, 'query')
       if (Array.isArray(parsed)) return parsed
       if (Array.isArray(parsed?.rows)) return parsed.rows

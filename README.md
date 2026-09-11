@@ -51,10 +51,18 @@ session/disposed ──▶ final flush + consolidation, thresholds waived
 agent/session-start ──▶ rules/taboos inject()
 ```
 
-- **Collector** records human `user/message` and `assistant/message` (each
-  assistant message with a collapsed ledger of its own step's tool calls),
-  redacts secrets, rewrites relative dates against the time the message was
-  sent, caps both user and assistant text, and enqueues idempotent log tasks. Plugin-sourced
+- **Collector** records human `user/message` and `assistant/message`, redacts
+  secrets, rewrites relative dates against the time the message was sent, caps
+  both user and assistant text, and enqueues idempotent log tasks.
+
+  Each assistant message carries a ledger of its own step's tool calls in the
+  shape the hypatia-memory protocol asks for — what was called, how long it
+  took, whether it worked, and one line of error on failure — **never the
+  output** (`1. \`read\` ×5 — ✅ 1.2s total`). Tool outputs had been 84% of all
+  stored message bytes, mostly file paths and contents, and made unrelated
+  keyword searches match chat logs. Tool-call blocks leave no `[tool-call]`
+  placeholder in the content; a step that only called tools says
+  `(tool calls only)`. Plugin-sourced
   messages are skipped — no feedback loops.
 
   Spans are cut at `turn/end`, and — for a turn that outlasts `flushWindowMs` —

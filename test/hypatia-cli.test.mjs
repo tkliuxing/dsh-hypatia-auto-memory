@@ -61,3 +61,38 @@ test('fitDataArgument keeps one argv element under the byte ceiling', () => {
   assert.match(out, /\[\.\.\.truncated \d+ bytes to fit the command line\]$/)
   assert.equal(fitDataArgument('small'), 'small')
 })
+
+/** A subprocess stub whose every call prints `stdout` and exits 0. */
+function makeSubprocessPrinting(stdout) {
+  return {
+    subprocess: {
+      spawn() {
+        return {
+          done: Promise.resolve({ exitCode: 0 }),
+          collected: {
+            stdout: { readFrom: () => ({ text: stdout }) },
+            stderr: { readFrom: () => ({ text: '' }) },
+          },
+        }
+      },
+    },
+  }
+}
+
+test('a result row that merely contains the empty sentinel is not discarded', async () => {
+  // Stored tool output reads "No results found." inside ordinary rows. Testing
+  // for the phrase anywhere in stdout threw away the entire result set.
+  const row = { name: 'msg-s-1', content: { data: '1. `grep` — ✅ No results found.' }, distance: 0.1 }
+  const cli = createHypatiaCli(makeSubprocessPrinting(JSON.stringify([row], null, 2)), { binaries: ['hypatia'] })
+  assert.equal((await cli.similar('grep')).length, 1)
+  assert.equal((await cli.search('grep')).length, 1)
+  assert.equal((await cli.query('["$knowledge"]')).length, 1)
+})
+
+test('only the bare sentinel means "no results", for query too', async () => {
+  const cli = createHypatiaCli(makeSubprocessPrinting('No results found.\n'), { binaries: ['hypatia'] })
+  assert.deepEqual(await cli.similar('x'), [])
+  assert.deepEqual(await cli.search('x'), [])
+  // `query` used to hand the sentinel to JSON.parse and throw BAD_JSON.
+  assert.deepEqual(await cli.query('["$knowledge"]'), [])
+})
