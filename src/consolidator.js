@@ -18,6 +18,7 @@ import { absolutizeDates, blocksToText, flattenToolResult, redactSecrets } from 
 import { countLoggableMessages, isLoggableMessage } from './collector.js'
 import { messageName, summaryName } from './writer.js'
 import { EMPTY_PROGRESS, advanceProgress } from './progress.js'
+import { TaskDeferredError } from './queue.js'
 
 export const PLUGIN_NAME = 'dsh-hypatia-auto-memory'
 
@@ -455,7 +456,7 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
     warnedNoRoute = false
     const session = sessions.get(task.sessionId)
     if (session === undefined) {
-      throw new Error(`session ${task.sessionId} not live; will retry`)
+      throw new TaskDeferredError(`session ${task.sessionId} is not loaded; deferred until it is`)
     }
     // Clamped here as well as at scheduling time: a task persisted by an older
     // build may still carry a range reaching into a fork's inherited prefix.

@@ -11,6 +11,8 @@
  * - Crash convergence: executors are idempotent (get-before-create writer),
  *   and backfill re-enqueues unfinished ranges under the same task id, so a
  *   replay converges instead of duplicating.
+ * - Deferral: an executor that cannot run yet throws `TaskDeferredError`; the
+ *   task waits as `deferred`, spending no attempts, until `resumeSession`.
  * - Dispose: timers cleared, in-flight chains awaited up to a deadline;
  *   everything not finished stays durable for the next boot.
  *
@@ -18,6 +20,25 @@
  */
 
 const DISPOSE_DEADLINE_MS = 5000
+
+/**
+ * Thrown by an executor that cannot run YET — typically because the session it
+ * reads from is not loaded — as opposed to one that failed.
+ *
+ * The remedy differs, so the signal must too. A timed retry is the right answer
+ * to a flaky CLI call and the wrong one here: DSH loads sessions lazily, so a
+ * session that is not live now may stay that way for hours, and three retries
+ * five seconds apart only stamped `failed` on work that was never attempted. A
+ * deferred task keeps its attempt count, holds no timer, and is scheduled again
+ * by `resumeSession` when its session next appears.
+ */
+export class TaskDeferredError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'TaskDeferredError'
+    this.deferred = true
+  }
+}
 
 /**
  * @param {{
@@ -166,6 +187,15 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
         }
         status.count('tasksDone')
       } catch (error) {
+        if (error?.deferred === true) {
+          tasks.update(id, (t) => ({
+            ...t,
+            status: 'deferred',
+            error: error instanceof Error ? error.message : String(error),
+          }))
+          status.info(`task ${id} deferred: ${error.message}`)
+          return
+        }
         // Permanent failures (e.g. malformed model output) get no retries —
         // re-running an unhealable task only wedges the session chain.
         const attempts = error?.permanent === true
@@ -214,12 +244,13 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
    * nothing re-derived it: a restart between persisting one and running it left
    * it sitting in the table until some later trigger happened to reuse its id.
    * `running` is included on purpose — seen at registration it can only mean
-   * the previous process died mid-task. `failed` stays put for inspection.
+   * the previous process died mid-task. `failed` stays put for inspection, and
+   * `deferred` waits for its session to come back (see `resumeSession`).
    */
   function resumeKind(kind) {
     if (typeof tasks.entries !== 'function') return
     for (const [id, record] of tasks.entries()) {
-      if (record?.kind !== kind || record.status === 'failed') continue
+      if (record?.kind !== kind || record.status === 'failed' || record.status === 'deferred') continue
       schedule(id)
     }
   }
@@ -277,6 +308,43 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
     },
 
     /**
+     * Schedule every deferred task of one session — called when the session
+     * becomes live again, which is the only thing a deferred task waits for.
+     * @param {string} sessionId
+     * @returns {number} how many tasks were resumed.
+     */
+    resumeSession(sessionId) {
+      if (typeof tasks.entries !== 'function') return 0
+      const ids = []
+      for (const [id, record] of tasks.entries()) {
+        if (record?.sessionId === sessionId && record.status === 'deferred') ids.push(id)
+      }
+      for (const id of ids) schedule(id)
+      return ids.length
+    },
+
+    /**
+     * Delete `failed` records of the given kinds.
+     *
+     * Only for kinds whose work is fully re-derivable from progress watermarks:
+     * a failed `log-message` never advanced `lastLoggedSeq`, so that session's
+     * next flush covers the same range anyway, and the record carries nothing
+     * but an error message. Called once at startup, so the message survives for
+     * the whole run that produced it.
+     * @param {readonly string[]} kinds
+     * @returns {number} how many records were removed.
+     */
+    pruneFailed(kinds) {
+      if (typeof tasks.entries !== 'function') return 0
+      const ids = []
+      for (const [id, record] of tasks.entries()) {
+        if (record?.status === 'failed' && kinds.includes(record.kind)) ids.push(id)
+      }
+      for (const id of ids) tasks.delete(id)
+      return ids.length
+    },
+
+    /**
      * Resolve once this session has no work left in flight.
      *
      * Used to decide when a disposed session's object can be released: its
@@ -297,7 +365,9 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
         }
         const outstanding = kinds.some((kind) => {
           const record = tasks.get(taskId(kind, sessionId))
-          return record !== undefined && record.status !== 'failed'
+          // Deferred work cannot run until its session is back, so it is not
+          // something to wait for here.
+          return record !== undefined && record.status !== 'failed' && record.status !== 'deferred'
         })
         if (!outstanding) return true
         await new Promise((resolve) => setTimeout(resolve, 50))

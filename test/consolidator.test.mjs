@@ -9,6 +9,7 @@ import {
   PermanentConsolidationError,
 } from '../src/consolidator.js'
 import { createWriter } from '../src/writer.js'
+import { TaskDeferredError } from '../src/queue.js'
 
 function ev(type, seq, data = {}, time = 1725800000000) {
   return { type, seq, time, data }
@@ -382,4 +383,20 @@ test('execute on a fork summarises only its own messages and links their real na
   )
   const cascade = h.enqueued.find((t) => t.kind === 'cascade')
   assert.deepEqual([cascade.fromSeq, cascade.immediate], [4, true])
+})
+
+test('execute defers, rather than fails, when the session is not loaded', async () => {
+  const c = createConsolidator({
+    queue: { async enqueue() {} },
+    progress: { get: () => undefined, put: () => {} },
+    sessions: { get: () => undefined },
+    llm: {}, cli: {}, writer: {},
+    getConfig: () => ({ consolidation: { models: [{ provider: 'p', model: 'm' }], maxInputTokens: 1000 } }),
+    status: { info: () => {}, warn: () => {}, error: () => {}, count: () => {} },
+    projectFor: async () => 'demo',
+  })
+  await assert.rejects(
+    c.execute({ sessionId: 's9', fromSeq: 0, toSeq: 5, project: 'demo' }),
+    (error) => error instanceof TaskDeferredError && error.deferred === true,
+  )
 })

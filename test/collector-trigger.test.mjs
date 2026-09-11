@@ -23,18 +23,22 @@ function makeHarness({ checkEveryTurns = 3, minNewTokens = 100 } = {}) {
   // session must still be resolvable.
   let openDrain
   const drained = new Promise((resolve) => { openDrain = resolve })
+  const resumed = []
   const queue = {
     enqueue: async (task) => { enqueued.push(task) },
     whenIdle: async () => { await drained; return true },
+    resumeSession: (id) => { resumed.push(id); return 1 },
   }
 
   let handler
   let disposeHandler
+  let createdHandler
   const ctx = {
     sessions: { get: () => undefined },
     on: (event, fn) => {
       if (event === 'session/event') handler = fn
       else if (event === 'session/disposed') disposeHandler = fn
+      else if (event === 'session/created') createdHandler = fn
       else assert.fail(`unexpected listener: ${event}`)
     },
   }
@@ -62,7 +66,8 @@ function makeHarness({ checkEveryTurns = 3, minNewTokens = 100 } = {}) {
 
   const session = { header: { id: 's1' }, inheritedEventCount: 0, seq: 0 }
   return {
-    collector, progress, enqueued, session, sessionEnds,
+    collector, progress, enqueued, session, sessionEnds, resumed,
+    reopen: () => createdHandler(session),
     emit: (event) => handler(session, event),
     dispose: () => disposeHandler(session),
     openDrain: () => openDrain(),
@@ -235,4 +240,12 @@ test('a host session summary schedules the session node', async () => {
       event.type,
     )
   }
+})
+
+test('a session coming back resumes the tasks deferred for it', () => {
+  // DSH loads sessions lazily; `session/created` fires for a reopened session as
+  // well as a new one, and it is the moment deferred work can finally run.
+  const h = makeHarness()
+  h.reopen()
+  assert.deepEqual(h.resumed, ['s1'])
 })

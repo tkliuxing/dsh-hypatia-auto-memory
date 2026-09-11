@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createQueue } from '../src/queue.js'
+import { TaskDeferredError, createQueue } from '../src/queue.js'
 
 /** Map-backed storageDomain table double. */
 function makeTable(seed = {}) {
@@ -307,4 +307,65 @@ test('registering an executor resumes the backlog of its kind', async () => {
   await new Promise((resolve) => setTimeout(resolve, 20))
   assert.ok(ran.includes('cascade:a'))
   assert.equal(table.get('cascade:a'), undefined)
+})
+
+test('a task whose session is not loaded is deferred, not failed', async () => {
+  // DSH loads sessions lazily. Three retries five seconds apart used to stamp
+  // `failed` on work that had never been attempted.
+  const table = makeTable()
+  let calls = 0
+  let available = false
+  const queue = createQueue({
+    tasks: table,
+    getConfig: () => ({ ...CONFIG, maxAttempts: 2 }),
+    executors: {
+      'log-message': async () => {
+        calls += 1
+        if (!available) throw new TaskDeferredError('session a is not loaded')
+      },
+    },
+    status: makeStatus(),
+  })
+  await queue.enqueue({ kind: 'log-message', sessionId: 'a', fromSeq: 0, toSeq: 3, project: 'p' })
+  await new Promise((resolve) => setTimeout(resolve, 40))
+
+  const record = table.get('log-message:a')
+  assert.equal(record.status, 'deferred')
+  assert.equal(record.attempts, 0, 'no attempt spent')
+  assert.equal(calls, 1, 'no retry timer')
+  assert.equal(await queue.whenIdle('a', { timeoutMs: 100 }), true, 'deferred work is not waited on')
+
+  available = true
+  assert.equal(queue.resumeSession('a'), 1)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(calls, 2)
+  assert.equal(table.get('log-message:a'), undefined)
+})
+
+test('registering an executor leaves deferred tasks for their session', async () => {
+  const table = makeTable({
+    'consolidate:a': { kind: 'consolidate', sessionId: 'a', fromSeq: 0, toSeq: 5, project: 'p', status: 'deferred', attempts: 0, enqueuedAt: 0 },
+  })
+  const ran = []
+  const queue = createQueue({ tasks: table, getConfig: () => CONFIG, status: makeStatus() })
+  queue.registerExecutor('consolidate', async (task) => { ran.push(task.sessionId) })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.deepEqual(ran, [], 'registration alone cannot make the session available')
+
+  queue.resumeSession('a')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.deepEqual(ran, ['a'])
+})
+
+test('pruneFailed removes only failed records of the named kinds', () => {
+  const table = makeTable({
+    'log-message:a': { kind: 'log-message', sessionId: 'a', status: 'failed', fromSeq: 0, toSeq: 1, attempts: 3 },
+    'log-message:b': { kind: 'log-message', sessionId: 'b', status: 'pending', fromSeq: 0, toSeq: 1, attempts: 0 },
+    'consolidate:a': { kind: 'consolidate', sessionId: 'a', status: 'failed', fromSeq: 0, toSeq: 1, attempts: 3 },
+  })
+  const queue = createQueue({ tasks: table, getConfig: () => CONFIG, status: makeStatus() })
+  assert.equal(queue.pruneFailed(['log-message']), 1)
+  assert.equal(table.get('log-message:a'), undefined)
+  assert.ok(table.get('log-message:b'), 'unfinished work untouched')
+  assert.ok(table.get('consolidate:a'), 'other kinds keep their failure for inspection')
 })

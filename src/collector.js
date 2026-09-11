@@ -104,7 +104,7 @@ export function createCollector({ ctx, queue, progress, getConfig, status, onTur
    * they need the object itself. A disposed session is still perfectly readable
    * — `snapshotEvents` works fine — it is merely gone from `ctx.sessions`, so
    * holding the reference across the drain is what lets end-of-session work run
-   * at all instead of failing with "session not live" until it exhausts retries.
+   * at all, rather than being deferred to wait for a session that has closed.
    *
    * @type {Map<string, any>}
    */
@@ -314,6 +314,23 @@ export function createCollector({ ctx, queue, progress, getConfig, status, onTur
   ctx.on('session/disposed', (session) => {
     if (getConfig().collector?.enabled === false) return
     void finishSession(session)
+  })
+
+  // ---- session (re)open -----------------------------------------------------------
+
+  /**
+   * Resume whatever this session's tasks were waiting on.
+   *
+   * DSH loads sessions lazily, so work persisted by an earlier run — or queued
+   * for a session that closed before it ran — finds no session to read and is
+   * deferred rather than failed. `session/created` fires both for a new session
+   * and for one reopened from disk, which is the moment that work can run.
+   */
+  ctx.on('session/created', (session) => {
+    const id = sessionIdOf(session)
+    if (id === '' || typeof queue.resumeSession !== 'function') return
+    const resumed = queue.resumeSession(id)
+    if (resumed > 0) status.info(`session ${id} is live again; resumed ${resumed} deferred task(s)`)
   })
 
   // ---- boot backfill ------------------------------------------------------------

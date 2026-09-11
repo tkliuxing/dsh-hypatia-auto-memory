@@ -25,7 +25,7 @@ import { EMPTY_PROGRESS, advanceProgress } from './progress.js'
 import { createStatus } from './status.js'
 import { createHypatiaCli } from './hypatia-cli.js'
 import { createWriter } from './writer.js'
-import { createQueue } from './queue.js'
+import { TaskDeferredError, createQueue } from './queue.js'
 import { countLoggableMessages, createCollector, formatSpan } from './collector.js'
 import { createCascade } from './cascade.js'
 import { createConsolidator, PLUGIN_NAME } from './consolidator.js'
@@ -170,7 +170,7 @@ function applyCollect(ctx, cordisConfig) {
       // down has already left the store while its final span is still queued.
       const session = collector.sessionFor(task.sessionId)
       if (session === undefined) {
-        throw new Error(`session ${task.sessionId} not live; will retry`)
+        throw new TaskDeferredError(`session ${task.sessionId} is not loaded; deferred until it is`)
       }
       const config = configHandle.get()
       const events = session.snapshotEvents(task.fromSeq, task.toSeq)
@@ -222,7 +222,7 @@ function applyCollect(ctx, cordisConfig) {
     queue.registerExecutor('session-node', async (task) => {
       const session = collector.sessionFor(task.sessionId)
       if (session === undefined) {
-        throw new Error(`session ${task.sessionId} not live; will retry`)
+        throw new TaskDeferredError(`session ${task.sessionId} is not loaded; deferred until it is`)
       }
       const [event] = session.snapshotEvents(task.fromSeq, task.toSeq)
       if (event === undefined) return
@@ -248,6 +248,12 @@ function applyCollect(ctx, cordisConfig) {
         lastBelongToIndex: Math.max(progressRow.lastBelongToIndex, linkTo),
       }))
     })
+
+    // Failed log-message records carry nothing the watermark does not: the range
+    // was never marked logged, so the session's next flush covers it again.
+    // Pruned at startup so the error message survives the run that produced it.
+    const pruned = queue.pruneFailed(['log-message'])
+    if (pruned > 0) status.info(`pruned ${pruned} failed log-message task(s); the watermarks re-derive their ranges`)
 
     await collector.backfillLiveSessions()
     status.info('collector running (backfill complete)')
