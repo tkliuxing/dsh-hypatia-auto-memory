@@ -174,6 +174,7 @@ The cordis config block on the bundle row only carries skill packaging:
 | Summaries but no `sum2-*` | Fewer than `cascade.batchSize` unarchived tier-1 summaries in that project yet |
 | Work units have no relationships | No embedding model on the shelf (`similar` fails), or every candidate was beyond `dedupMaxDistance` |
 | Task in `failed` state | CLI or model error persisted after `maxAttempts`; re-enqueue by lowering the watermark via state inspection, or delete the failed task and touch progress to re-backfill |
+| Watermark says logged, but the shelf has no entries | The shelf was reset or switched after logging. Watermarks live in `~/.dsh/storages/hypatia_auto_memory.json`, not in hypatia, so they survive the reset and those ranges are never re-logged. Stop DSH, delete the affected sessions' `progress` rows (or the whole file), then restart — backfill re-logs live sessions |
 | Duplicate `msg-*` after weird manual edits | Delete the entry in hypatia and lower `lastLoggedSeq` for that session in the state domain — backfill recreates it once |
 | Project scope looks wrong | Scope = git-root basename of the session cwd (falls back to basename); two same-named checkouts share a scope by design |
 

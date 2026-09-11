@@ -73,6 +73,26 @@ export function classifyTurnEnd(reason) {
   }
 }
 
+/**
+ * Where the next consolidation span begins: the watermark, but never inside a
+ * fork's inherited prefix.
+ *
+ * A forked session's log opens with its parent's events (`inheritedEventCount`
+ * of them). The logger has always skipped that prefix; consolidation did not,
+ * because a fresh fork's watermark starts at 0. The result was the parent's
+ * conversation summarised a second time under the child's id, and — since
+ * message ordinals are counted from the end of the prefix — the summary's edges
+ * pointed at the child's own `msg-*-N` entries, marking messages summarised
+ * whose content the summary never saw.
+ *
+ * @param {{lastConsolidatedSeq?: number} | undefined} progressRow
+ * @param {{inheritedEventCount?: number} | undefined} session
+ * @returns {number}
+ */
+export function consolidationStart(progressRow, session) {
+  return Math.max(progressRow?.lastConsolidatedSeq ?? 0, session?.inheritedEventCount ?? 0)
+}
+
 /** System directive: span summary + work-unit extraction as strict JSON. */
 function consolidationInstruction(maxWorkUnits) {
   return [
@@ -286,19 +306,24 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
       status.warn(`consolidation deferred for ${sessionId}: session not live`)
       return { resetTokens: false, advanceCheckpoint: false }
     }
+    const fromSeq = consolidationStart(current, session)
     const toSeq = Math.min(session.seq ?? 0, current.lastLoggedSeq)
-    if (toSeq <= current.lastConsolidatedSeq) {
+    if (toSeq <= fromSeq) {
       return { resetTokens: false, advanceCheckpoint: false }
     }
     const project = await projectFor(session)
+    // Immediate: the thresholds already decided this span is ready. Riding the
+    // flush window only delayed it by `flushWindowMs` (two minutes by default),
+    // and a restart inside that window left the task persisted but unscheduled.
     await queue.enqueue({
       kind: 'consolidate',
       sessionId,
-      fromSeq: current.lastConsolidatedSeq,
+      fromSeq,
       toSeq,
       project,
+      immediate: true,
     })
-    status.info(`consolidation scheduled: ${sessionId} [${current.lastConsolidatedSeq}, ${toSeq})`)
+    status.info(`consolidation scheduled: ${sessionId} [${fromSeq}, ${toSeq})`)
     return { resetTokens: true, advanceCheckpoint: true }
   }
 
@@ -399,18 +424,19 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
     const config = getConfig()
     if (config.enabled === false || config.consolidation.enabled === false) return false
     const current = progress.get(sessionId) ?? EMPTY_PROGRESS
+    const fromSeq = consolidationStart(current, session)
     const toSeq = Math.min(session?.seq ?? 0, current.lastLoggedSeq)
-    if (toSeq <= current.lastConsolidatedSeq) return false
+    if (toSeq <= fromSeq) return false
     const project = await projectFor(session)
     await queue.enqueue({
       kind: 'consolidate',
       sessionId,
-      fromSeq: current.lastConsolidatedSeq,
+      fromSeq,
       toSeq,
       project,
       immediate: true,
     })
-    status.info(`consolidation scheduled at session end: ${sessionId} [${current.lastConsolidatedSeq}, ${toSeq})`)
+    status.info(`consolidation scheduled at session end: ${sessionId} [${fromSeq}, ${toSeq})`)
     return true
   }
 
@@ -431,7 +457,17 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
     if (session === undefined) {
       throw new Error(`session ${task.sessionId} not live; will retry`)
     }
-    const events = session.snapshotEvents(task.fromSeq, task.toSeq)
+    // Clamped here as well as at scheduling time: a task persisted by an older
+    // build may still carry a range reaching into a fork's inherited prefix.
+    const inherited = session.inheritedEventCount ?? 0
+    const fromSeq = Math.max(task.fromSeq, inherited)
+    if (task.toSeq <= fromSeq) {
+      advanceProgress(progress, task.sessionId, (current) => ({
+        lastConsolidatedSeq: Math.max(current.lastConsolidatedSeq, fromSeq),
+      }))
+      return
+    }
+    const events = session.snapshotEvents(fromSeq, task.toSeq)
     const now = new Date()
     const { text: transcript, lastSeq, complete } = buildTranscript(events, consolidation, now)
     if (transcript.trim() === '') {
@@ -482,13 +518,14 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
       .join('\n')
     const { summary, workUnits } = parseConsolidationOutput(text, consolidation.maxWorkUnitsPerRun)
 
-    const span = summaryName(task.sessionId, task.fromSeq, coveredToSeq)
+    const span = summaryName(task.sessionId, fromSeq, coveredToSeq)
     // The entries the log executor actually wrote for this span. Both sides
     // derive names the same way — same predicate, same dense ordinal counted
-    // over the same immutable prefix — so the links are guaranteed to resolve
-    // without probing hypatia for each one.
-    const inherited = session.inheritedEventCount ?? 0
-    let itemIndex = countLoggableMessages(session.snapshotEvents(inherited, task.fromSeq))
+    // from the end of the inherited prefix — so the links resolve without
+    // probing hypatia for each one. That only holds because `fromSeq` never
+    // precedes the prefix: counting from inside it would restart the ordinals
+    // at 0 and name the parent's messages after the child's.
+    let itemIndex = countLoggableMessages(session.snapshotEvents(inherited, fromSeq))
     const items = []
     for (const event of events) {
       if (!isLoggableMessage(event)) continue
@@ -497,7 +534,7 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
     }
     await writer.writeSummary({
       sessionId: task.sessionId,
-      fromSeq: task.fromSeq,
+      fromSeq: fromSeq,
       toSeq: coveredToSeq,
       markdown: summary,
       project: task.project,
@@ -529,13 +566,14 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
       await queue.enqueue({
         kind: 'cascade',
         sessionId: task.sessionId,
-        fromSeq: task.fromSeq,
+        fromSeq: fromSeq,
         toSeq: coveredToSeq,
         project: task.project,
+        immediate: true,
       })
     }
     if (!complete) {
-      status.info(`consolidation covered [${task.fromSeq}, ${coveredToSeq}) of [${task.fromSeq}, ${task.toSeq}); remainder deferred`)
+      status.info(`consolidation covered [${fromSeq}, ${coveredToSeq}) of [${fromSeq}, ${task.toSeq}); remainder deferred`)
     }
     status.markConsolidated()
     status.count('consolidations')

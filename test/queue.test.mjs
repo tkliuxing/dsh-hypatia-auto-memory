@@ -15,6 +15,7 @@ function makeTable(seed = {}) {
     },
     delete: (k) => void map.delete(k),
     dump: () => [...map.entries()],
+    entries: () => map.entries(),
     map,
   }
 }
@@ -279,4 +280,31 @@ test('a backfill reaching under a running task re-runs the widened range', async
 
   // Writes are get-before-create, so replaying the overlap converges.
   assert.deepEqual(seen, [[10, 12], [4, 12]])
+})
+
+test('registering an executor resumes the backlog of its kind', async () => {
+  // A consolidate / cascade / session-node record carries its own range, and
+  // nothing re-derived it: a restart between persisting and running one left it
+  // in the table until some later trigger happened to reuse its id.
+  const table = makeTable({
+    'consolidate:a': { kind: 'consolidate', sessionId: 'a', fromSeq: 0, toSeq: 5, project: 'p', status: 'pending', attempts: 0, enqueuedAt: 0 },
+    'consolidate:b': { kind: 'consolidate', sessionId: 'b', fromSeq: 0, toSeq: 5, project: 'p', status: 'running', attempts: 0, enqueuedAt: 0 },
+    'consolidate:c': { kind: 'consolidate', sessionId: 'c', fromSeq: 0, toSeq: 5, project: 'p', status: 'failed', attempts: 3, enqueuedAt: 0 },
+    'cascade:a': { kind: 'cascade', sessionId: 'a', fromSeq: 0, toSeq: 5, project: 'p', status: 'pending', attempts: 0, enqueuedAt: 0 },
+  })
+  const ran = []
+  const queue = createQueue({ tasks: table, getConfig: () => CONFIG, status: makeStatus() })
+
+  queue.registerExecutor('consolidate', async (task) => { ran.push(`consolidate:${task.sessionId}`) })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+
+  // `running` at registration can only mean the previous process died mid-task.
+  assert.deepEqual(ran.sort(), ['consolidate:a', 'consolidate:b'])
+  assert.equal(table.get('consolidate:c').status, 'failed', 'failed tasks stay for inspection')
+  assert.ok(table.get('cascade:a'), 'another kind waits for its own executor')
+
+  queue.registerExecutor('cascade', async (task) => { ran.push(`cascade:${task.sessionId}`) })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.ok(ran.includes('cascade:a'))
+  assert.equal(table.get('cascade:a'), undefined)
 })

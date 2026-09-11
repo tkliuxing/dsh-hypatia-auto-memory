@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   buildTranscript,
+  consolidationStart,
   createConsolidator,
   parseConsolidationOutput,
   PermanentConsolidationError,
@@ -217,7 +218,7 @@ test('onTurnEnd retains the checkpoint while consolidation is disabled', async (
 })
 
 /** Minimal doubles for a full `execute` run. */
-function makeExecuteHarness({ events, maxInputTokens }) {
+function makeExecuteHarness({ events, maxInputTokens, inherited = 0 }) {
   const progressMap = new Map()
   const progress = {
     get: (k) => progressMap.get(k),
@@ -245,13 +246,15 @@ function makeExecuteHarness({ events, maxInputTokens }) {
       yield { type: 'finish', reason: { kind: 'stop' } }
     },
   }
+  const enqueued = []
   const consolidator = createConsolidator({
-    queue: { async enqueue() {} },
+    queue: { async enqueue(task) { enqueued.push(task) } },
     progress,
     sessions: {
       get: () => ({
         seq: events.length,
-        snapshotEvents: (from, to) => events.filter((e) => e.seq >= from && e.seq < to),
+        inheritedEventCount: inherited,
+        snapshotEvents: (from, to = Infinity) => events.filter((e) => e.seq >= from && e.seq < to),
       }),
     },
     llm,
@@ -273,7 +276,7 @@ function makeExecuteHarness({ events, maxInputTokens }) {
     status,
     projectFor: async () => 'demo',
   })
-  return { consolidator, progressMap, written, prompts }
+  return { consolidator, progressMap, written, prompts, enqueued }
 }
 
 test('execute advances the watermark only over the span it actually consolidated', async () => {
@@ -315,4 +318,68 @@ test('execute covers the whole span when it fits, and never ships raw secrets', 
   assert.equal(h.prompts.length, 1)
   assert.ok(!h.prompts[0].includes('sk-abcdef1234567890XYZ'), 'secret reached the model')
   assert.ok(h.prompts[0].includes('[REDACTED:secret:key]'))
+})
+
+test('consolidationStart never begins inside a fork\'s inherited prefix', () => {
+  assert.equal(consolidationStart({ lastConsolidatedSeq: 0 }, { inheritedEventCount: 62678 }), 62678)
+  assert.equal(consolidationStart({ lastConsolidatedSeq: 70000 }, { inheritedEventCount: 62678 }), 70000)
+  assert.equal(consolidationStart(undefined, undefined), 0)
+})
+
+test('onTurnEnd schedules a fork from the end of its prefix, immediately', async () => {
+  // Observed in the wild: a fork with a 62,678-event seed consolidated
+  // [0, 45712) — entirely its parent's conversation — under its own id.
+  const enqueued = []
+  const c = createConsolidator({
+    queue: { enqueue: async (t) => { enqueued.push(t) } },
+    progress: { get: () => ({ lastLoggedSeq: 65723, lastConsolidatedSeq: 0, lastCheckTurn: 0, pendingTokens: 0 }) },
+    sessions: { get: () => ({ seq: 65800, inheritedEventCount: 62678 }) },
+    llm: {}, cli: {}, writer: {},
+    getConfig: () => ({
+      enabled: true,
+      consolidation: { enabled: true, checkEveryTurns: 1, minNewTokens: 1, maxWorkUnitsPerRun: 3 },
+    }),
+    status: { warn: () => {}, info: () => {}, count: () => {}, error: () => {} },
+    projectFor: async () => 'demo',
+  })
+  const decision = await c.onTurnEnd('s1', 5, { lastCheckTurn: 0, pendingTokens: 9999 })
+  assert.deepEqual(decision, { resetTokens: true, advanceCheckpoint: true })
+  assert.deepEqual(
+    [enqueued[0].fromSeq, enqueued[0].toSeq, enqueued[0].immediate],
+    [62678, 65723, true],
+    'starts at the prefix end, and skips the two-minute flush window',
+  )
+})
+
+test('execute skips a stale task that lies wholly inside the inherited prefix', async () => {
+  // A task persisted by the buggy build can still be sitting in the table.
+  const events = [ev('user/message', 1, { source: { kind: 'user' }, content: [{ type: 'text', text: 'parent talk' }] })]
+  const h = makeExecuteHarness({ events, maxInputTokens: 10_000, inherited: 10 })
+  await h.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 8, project: 'demo' })
+
+  assert.equal(h.prompts.length, 0, 'no model call spent re-summarising the parent')
+  assert.equal(h.written.knowledge.length, 0)
+  assert.equal(h.progressMap.get('s1').lastConsolidatedSeq, 10, 'watermark jumps past the prefix')
+})
+
+test('execute on a fork summarises only its own messages and links their real names', async () => {
+  const msg = (seq, text) => ev('user/message', seq, { source: { kind: 'user' }, content: [{ type: 'text', text }] })
+  const events = [
+    msg(0, 'parent message zero'), msg(1, 'parent message one'), msg(2, 'parent message two'), msg(3, 'parent message three'),
+    msg(4, 'child message zero'), msg(5, 'child message one'), msg(6, 'child message two'),
+  ]
+  const h = makeExecuteHarness({ events, maxInputTokens: 10_000, inherited: 4 })
+  await h.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 7, project: 'demo' })
+
+  assert.ok(!h.prompts[0].includes('parent message'), 'the prefix never reaches the model')
+  assert.ok(h.prompts[0].includes('child message two'))
+  assert.equal(h.written.knowledge[0].name, 'sum-s1-4-7')
+  // The child's first own message is ordinal 0 — the same name the log
+  // executor gave it — so the edge lands on the message the summary describes.
+  assert.deepEqual(
+    h.written.statements.filter(([, rel]) => rel === 'summary').map(([, , tail]) => tail),
+    ['msg-s1-0', 'msg-s1-1', 'msg-s1-2'],
+  )
+  const cascade = h.enqueued.find((t) => t.kind === 'cascade')
+  assert.deepEqual([cascade.fromSeq, cascade.immediate], [4, true])
 })

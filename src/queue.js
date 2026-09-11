@@ -206,10 +206,36 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
     timers.set(id, timer)
   }
 
+  /**
+   * Schedule every persisted, unfinished task of one kind.
+   *
+   * Log ranges were always recoverable from the watermarks, but a pending
+   * consolidate / cascade / session-node record carries its own range and
+   * nothing re-derived it: a restart between persisting one and running it left
+   * it sitting in the table until some later trigger happened to reuse its id.
+   * `running` is included on purpose — seen at registration it can only mean
+   * the previous process died mid-task. `failed` stays put for inspection.
+   */
+  function resumeKind(kind) {
+    if (typeof tasks.entries !== 'function') return
+    for (const [id, record] of tasks.entries()) {
+      if (record?.kind !== kind || record.status === 'failed') continue
+      schedule(id)
+    }
+  }
+
   return {
-    /** Register or replace the executor for one task kind (late binding). */
+    /**
+     * Register or replace the executor for one task kind (late binding), and
+     * resume any backlog of that kind a previous process left persisted.
+     *
+     * Executors attach at different times — `consolidate` and `cascade` only
+     * once the `llm` service arrives — so resuming per kind, at registration, is
+     * what guarantees a task is never scheduled before something can run it.
+     */
     registerExecutor(kind, executor) {
       executors[kind] = executor
+      resumeKind(kind)
     },
 
     /**
@@ -240,14 +266,10 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
       }
     },
 
-    /**
-     * Boot recovery is progress-driven, not table-scan-driven: the storage
-     * table deliberately has no enumeration, and the collector's backfill
-     * re-enqueues every uncovered range under the same task ids — persisting
-     * over any pending/running record a crash left behind — so replays
-     * converge without a scan. Kept as an explicit no-op to document that.
-     */
-    async requeueAll() {},
+    /** Resume every unfinished task whose kind currently has an executor. */
+    async requeueAll() {
+      for (const kind of Object.keys(executors)) resumeKind(kind)
+    },
 
     /** One task currently persisted for (kind, session), if any. */
     peek(kind, sessionId) {
