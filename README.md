@@ -169,6 +169,7 @@ The cordis config block on the bundle row only carries skill packaging:
 | Symptom | Cause / handling |
 |---|---|
 | No entries after chatting | `enabled: false`, missing `hypatia` binary, or the collect fiber PENDING (needs `sessions`, `storageDomain`, `subprocess`, `settings` from the base composition) — check profile logs |
+| Nothing logged for a whole run after a restart | The storage domain refused to open because a stored record failed its schema. The storage service validates on read, not on write, so a bad write only surfaces at the next startup — and one bad row fails the whole domain. Look for `startup failed` / `does not match its schema` in the profile log. Task rows missing `error` are now defaulted; for any other bad row, stop DSH, remove it from `~/.dsh/storages/hypatia_auto_memory.json`, and restart |
 | Entries appear only after a turn finishes | By design: spans are cut at `turn/end` so a tool ledger stays with its assistant message |
 | Logging works, no summaries | `consolidation.models` is empty or invalid — one warning at first trigger |
 | Summaries but no `sum2-*` | Fewer than `cascade.batchSize` unarchived tier-1 summaries in that project yet |

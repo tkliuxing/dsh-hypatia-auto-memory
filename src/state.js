@@ -49,12 +49,15 @@ export const taskTable = domainTable(z.object({
   toSeq: z.number().step(1).min(0),
   /** Project scope the entries are written under. */
   project: z.string().default(''),
-  /** pending | running | failed (done tasks are deleted). */
+  /** pending | running | deferred | failed (done tasks are deleted). */
   status: z.string().default('pending'),
   attempts: z.number().step(1).min(0).default(0),
-  // zod requires explicit nullability for fields that legacy deployments may
-  // already hold as null; these records are disposable queue state.
-  error: z.string().nullable(),
+  // Nullable for legacy rows holding null, and DEFAULTED for rows that lack the
+  // key: `persistTask` did not write it, and the storage service validates on
+  // read rather than on write. One such row still in the table at a restart made
+  // the whole domain refuse to open, which silently disabled the plugin for
+  // that run — nothing collected, nothing resumed, one line in a log.
+  error: z.string().nullable().default(null),
   enqueuedAt: z.number().default(0),
 }))
 

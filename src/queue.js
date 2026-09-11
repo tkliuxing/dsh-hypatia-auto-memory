@@ -123,6 +123,9 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
       project: spec.project,
       status: 'pending',
       attempts: 0,
+      // Written explicitly: the stored schema requires the key, and the storage
+      // service only checks that on the next read — i.e. at the next startup.
+      error: null,
       enqueuedAt: now(),
     })
     return id
