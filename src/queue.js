@@ -372,6 +372,42 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
       return ids.length
     },
 
+    /** Every session id that currently owns at least one task record. */
+    sessionIds() {
+      const ids = new Set()
+      if (typeof tasks.entries !== 'function') return ids
+      for (const [, record] of tasks.entries()) {
+        if (typeof record?.sessionId === 'string') ids.add(record.sessionId)
+      }
+      return ids
+    },
+
+    /**
+     * Drop every task of one session — for a session that no longer exists, whose
+     * work could never run again and would otherwise wait forever as `deferred`.
+     * A task already executing is left to finish.
+     * @param {string} sessionId
+     * @returns {Promise<number>} how many records were removed.
+     */
+    async forgetSession(sessionId) {
+      if (typeof tasks.entries !== 'function') return 0
+      const ids = []
+      for (const [id, record] of tasks.entries()) {
+        if (record?.sessionId !== sessionId) continue
+        if (record.status === 'running' || scheduled.has(id)) continue
+        ids.push(id)
+      }
+      for (const id of ids) {
+        const timer = timers.get(id)
+        if (timer !== undefined) {
+          clearTimeout(timer)
+          timers.delete(id)
+        }
+        await tasks.delete(id)
+      }
+      return ids.length
+    },
+
     /**
      * Resolve once this session has no work left in flight.
      *

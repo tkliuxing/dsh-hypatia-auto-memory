@@ -62,6 +62,16 @@ export const DEFAULTS = {
     enabled: true,
     preloadRulesTaboos: true,
   },
+  // Startup housekeeping of the progress table (see housekeeping.js). Both act
+  // only on positive evidence and skip on any doubt.
+  housekeeping: {
+    // Reset a row whose session has no msg-* entry left in the shelf (a wiped
+    // or replaced shelf). A session whose messages were all deleted on purpose
+    // looks the same and would be logged again — switch off if that matters.
+    reconcileOnStartup: true,
+    // Drop the row and tasks of a session DSH no longer has.
+    pruneVanishedSessions: true,
+  },
 }
 
 /** Exact LLM route eligible for one consolidation attempt. */
@@ -107,6 +117,10 @@ export const SettingsSchema = z.object({
     enabled: z.boolean().default(DEFAULTS.recall.enabled),
     preloadRulesTaboos: z.boolean().default(DEFAULTS.recall.preloadRulesTaboos),
   }).default(DEFAULTS.recall),
+  housekeeping: z.object({
+    reconcileOnStartup: z.boolean().default(DEFAULTS.housekeeping.reconcileOnStartup),
+    pruneVanishedSessions: z.boolean().default(DEFAULTS.housekeeping.pruneVanishedSessions),
+  }).default(DEFAULTS.housekeeping),
 })
 
 /**

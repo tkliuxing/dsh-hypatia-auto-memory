@@ -106,6 +106,13 @@ agent/session-start ──▶ rules/taboos inject()
   A contradiction keeps **both** entries and records `supersedes` — a memory
   system must not quietly forget what it once believed.
 
+- **Housekeeping** runs once per startup over the progress table. It resets a
+  row whose session has no `msg-*` entry left in the shelf — a wiped or
+  replaced shelf would otherwise leave that session unlogged for good — and
+  removes the row and tasks of a session DSH no longer has. Resetting costs a
+  re-log and a re-consolidation, so both passes act only on positive evidence:
+  a failed shelf query or an empty session listing changes nothing.
+
 - **Recall** preloads project/global rules and taboos at session start. Nothing
   else is pushed. Retrieval is the agent's job through the bundled skill, which
   is what `docs/memory-nolinear.md` prescribes for agents that hold context and
@@ -152,6 +159,9 @@ hypatia-auto-memory:
   recall:
     enabled: true
     preloadRulesTaboos: true
+  housekeeping:
+    reconcileOnStartup: true     # reset rows whose session has no msg-* left in the shelf
+    pruneVanishedSessions: true  # drop rows and tasks of sessions DSH no longer has
 ```
 
 The cordis config block on the bundle row only carries skill packaging:
@@ -188,7 +198,7 @@ The cordis config block on the bundle row only carries skill packaging:
 | Work units have no relationships | No embedding model on the shelf (`similar` fails), or every candidate was beyond `dedupMaxDistance` |
 | Task in `deferred` state | Its session is not loaded — DSH loads sessions lazily. Not an error: it spends no attempts and resumes by itself the next time that session is opened |
 | Task in `failed` state | A CLI or model error persisted after `maxAttempts`. Failed `log-message` records are pruned at the next startup, since the watermark re-derives their range; other kinds are kept for inspection — delete one to let the next trigger re-create it |
-| Watermark says logged, but the shelf has no entries | The shelf was reset or switched after logging. Watermarks live in `~/.dsh/storages/hypatia_auto_memory.json`, not in hypatia, so they survive the reset and those ranges are never re-logged. Stop DSH, delete the affected sessions' `progress` rows (or the whole file), then restart — backfill re-logs live sessions |
+| Watermark says logged, but the shelf has no entries | The shelf was reset or switched after logging. Handled at startup: `housekeeping.reconcileOnStartup` resets any row whose session has no `msg-*` left, and that session is re-logged — and re-consolidated — from the start on its next activity. A shelf query that fails leaves the row untouched. A session whose messages were all deleted on purpose is indistinguishable and is logged again; turn the switch off if that matters |
 | Duplicate `msg-*` after weird manual edits | Delete the entry in hypatia and lower `lastLoggedSeq` for that session in the state domain — backfill recreates it once |
 | Project scope looks wrong | Scope = git-root basename of the session cwd (falls back to basename); two same-named checkouts share a scope by design |
 

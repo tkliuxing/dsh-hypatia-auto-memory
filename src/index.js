@@ -9,6 +9,7 @@
  *   collect  (inject sessions, storageDomain, subprocess, settings)
  *     ├─ consolidate (inject llm, sessions)   — span summaries, cascade, work units
  *     ├─ recall      (inject agents)          — rules/taboos preload at session start
+ *     ├─ housekeeping (inject sessionPersistence) — prune progress of vanished sessions
  *     └─ skills      (inject skills)          — DSH-specific hypatia-memory skill
  *
  * @module dsh-hypatia-auto-memory
@@ -30,6 +31,7 @@ import { countLoggableMessages, createCollector, formatSpan } from './collector.
 import { createCascade } from './cascade.js'
 import { createConsolidator, PLUGIN_NAME } from './consolidator.js'
 import { createRecall } from './recall.js'
+import { pruneVanishedSessions, reconcileProgress } from './housekeeping.js'
 
 export const name = 'dsh-hypatia-auto-memory'
 
@@ -259,8 +261,42 @@ function applyCollect(ctx, cordisConfig) {
     const pruned = await queue.pruneFailed(['log-message'])
     if (pruned > 0) status.info(`pruned ${pruned} failed log-message task(s); the watermarks re-derive their ranges`)
 
+    // Progress rows whose session left nothing in the shelf (a wiped or replaced
+    // shelf) are reset BEFORE backfill, so a live session among them is logged
+    // from the start in this very run. See housekeeping.js for why it only acts
+    // on positive evidence.
+    if (configHandle.get().housekeeping?.reconcileOnStartup !== false) {
+      await reconcileProgress({ progress: state.progress, cli, status })
+    }
+
     await collector.backfillLiveSessions()
     status.info('collector running (backfill complete)')
+
+    // Rows and tasks of sessions DSH no longer has. A child fiber, because it
+    // needs `sessionPersistence` for the full listing — live sessions alone
+    // would make every unloaded session look gone. Registered only after the
+    // reconcile pass above, so the two never act on one row at once.
+    if (configHandle.get().housekeeping?.pruneVanishedSessions !== false) {
+      ctx.plugin({
+        name: `${name}/housekeeping`,
+        inject: ['sessionPersistence'],
+        apply: (c) => {
+          void (async () => {
+            const headers = await c.sessionPersistence.list()
+            const knownSessionIds = new Set(headers.map((header) => String(header?.id ?? '')).filter((id) => id !== ''))
+            await pruneVanishedSessions({
+              progress: state.progress,
+              queue,
+              knownSessionIds,
+              isLive: (id) => ctx.sessions.get(id) !== undefined,
+              status,
+            })
+          })().catch((error) => {
+            status.warn(`progress prune skipped: ${String(error)}`)
+          })
+        },
+      })
+    }
 
     // Optional child fibers — each waits only for the services it needs.
     ctx.plugin({
