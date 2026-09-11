@@ -21,6 +21,9 @@ export const DEFAULTS = {
   collector: {
     enabled: true,
     maxAssistantChars: 8000,
+    // User messages were never capped, so a pasted log went into hypatia whole.
+    // Generous, because what the user typed is the part most worth keeping.
+    maxUserChars: 32000,
     toolLedger: true,
   },
   consolidation: {
@@ -74,6 +77,7 @@ export const SettingsSchema = z.object({
   collector: z.object({
     enabled: z.boolean().default(DEFAULTS.collector.enabled),
     maxAssistantChars: z.number().step(1).min(500).default(DEFAULTS.collector.maxAssistantChars),
+    maxUserChars: z.number().step(1).min(500).default(DEFAULTS.collector.maxUserChars),
     toolLedger: z.boolean().default(DEFAULTS.collector.toolLedger),
   }).default(DEFAULTS.collector),
   consolidation: z.object({

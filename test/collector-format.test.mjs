@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { countLoggableMessages, formatSpan, isLoggableMessage } from '../src/collector.js'
+import { countLoggableMessages, formatSpan, isCompactionReplacement, isLoggableMessage } from '../src/collector.js'
 
 const NOW = new Date('2025-09-09T12:00:00Z')
 
@@ -15,7 +15,8 @@ test('formatSpan renders user and assistant messages with policy applied', () =>
       source: { kind: 'user' },
       content: [{ type: 'text', text: 'token=supersecret please fix sk-abcdef1234567890 now' }],
     }),
-    ev('assistant/message', 2, { turn: 3, message: { content: [{ type: 'text', text: 'on it, 今天完成' }] } }),
+    ev('assistant/message', 2, { turn: 3, message: { content: [{ type: 'text', text: 'on it, 今天完成' }] } },
+      new Date('2025-09-09T10:00:00').getTime()),
   ]
   const out = formatSpan(events, { now: NOW })
   assert.equal(out.length, 2)
@@ -139,4 +140,69 @@ test('isLoggableMessage is the single predicate both writers share', () => {
   assert.equal(isLoggableMessage(ev('user/message', 0, { source: { kind: 'plugin' } })), false)
   assert.equal(isLoggableMessage(ev('tool/result', 0, {})), false)
   assert.equal(isLoggableMessage(undefined), false)
+})
+
+test('relative dates resolve against when the message was sent, not when it is written', () => {
+  // A task deferred until its session reopens can be written days later; "明天"
+  // must still mean the day after the user said it.
+  const sent = new Date('2025-09-01T10:00:00').getTime()
+  const events = [ev('user/message', 1, { source: { kind: 'user' }, content: [{ type: 'text', text: '明天发布' }] }, sent)]
+  const [entry] = formatSpan(events, { now: new Date('2025-09-20T10:00:00') })
+  assert.match(entry.markdown, /2025-09-02发布/)
+})
+
+test('each assistant message carries only its own step\'s tool ledger', () => {
+  const events = [
+    ev('assistant/message', 1, { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'step one' }] } }),
+    ev('tool/call', 2, { turn: 1, step: 1, callId: 'a', name: 'grep' }),
+    ev('tool/result', 3, { turn: 1, step: 1, message: { source: { callId: 'a' }, content: [{ type: 'text', text: 'found a' }] } }),
+    ev('step/end', 4, { turn: 1, step: 1 }),
+    ev('assistant/message', 5, { turn: 1, step: 2, message: { content: [{ type: 'text', text: 'step two' }] } }),
+    ev('tool/call', 6, { turn: 1, step: 2, callId: 'b', name: 'read' }),
+    ev('tool/result', 7, { turn: 1, step: 2, message: { source: { callId: 'b' }, content: [{ type: 'text', text: 'read b' }] } }),
+    ev('step/end', 8, { turn: 1, step: 2 }),
+  ]
+  const [first, second] = formatSpan(events, { now: NOW })
+  assert.match(first.markdown, /`grep` — ✅ found a/)
+  assert.ok(!first.markdown.includes('read b'), 'step 2 tools do not leak into step 1')
+  assert.match(second.markdown, /`read` — ✅ read b/)
+  assert.ok(!second.markdown.includes('found a'), 'step 1 tools do not leak into step 2')
+})
+
+test('a compaction replacement is not counted as tool activity', () => {
+  // DSH compaction re-appends a pruned result right after its own
+  // `compaction/prune` event, carrying the original turn and step.
+  const events = [
+    ev('assistant/message', 10, { turn: 4, step: 1, message: { content: [{ type: 'text', text: 'working' }] } }),
+    ev('tool/call', 11, { turn: 4, step: 1, callId: 'c', name: 'grep' }),
+    ev('tool/result', 12, { turn: 4, step: 1, message: { source: { callId: 'c' }, content: [{ type: 'text', text: 'real result' }] } }),
+    ev('compaction/prune', 13, { shadowedRange: { start: 12, end: 13 } }),
+    ev('tool/result', 14, { turn: 4, step: 1, message: { source: { callId: 'c' }, content: [{ type: 'text', text: 'pruned copy' }] } }),
+  ]
+  const [entry] = formatSpan(events, { now: NOW })
+  assert.match(entry.markdown, /real result/)
+  assert.ok(!entry.markdown.includes('pruned copy'))
+  assert.ok(!entry.markdown.includes('×2'), 'not collapsed with its own copy either')
+})
+
+test('a replacement that opens the span is recognised through the event before it', () => {
+  const prune = ev('compaction/prune', 99, {})
+  const replacement = ev('tool/result', 100, { turn: 1, step: 1, message: { source: { callId: 'x' }, content: [] } })
+  const bySeq = new Map([[100, replacement]])
+  assert.equal(isCompactionReplacement(replacement, bySeq, prune), true)
+  assert.equal(isCompactionReplacement(replacement, bySeq, undefined), false)
+  assert.equal(isCompactionReplacement(replacement, bySeq, ev('step/end', 99, {})), false)
+})
+
+test('user messages are capped, and redacted before the cut', () => {
+  // A cut landing inside a secret would leave a fragment too short to match:
+  // capped first, the 1000-char cut keeps ` sk-AAAAAA` — six characters after
+  // the prefix, under the pattern's minimum of eight — so it would leak as-is.
+  const secret = 'sk-' + 'A'.repeat(40)
+  const text = 'x'.repeat(989) + ' ' + secret + ' ' + 'y'.repeat(5000)
+  const events = [ev('user/message', 1, { source: { kind: 'user' }, content: [{ type: 'text', text }] })]
+  const [entry] = formatSpan(events, { now: NOW, maxUserChars: 1000 })
+  assert.match(entry.markdown, /\[\.\.\.truncated \d+ chars\]/)
+  assert.ok(!entry.markdown.includes('sk-AAAA'), 'no secret fragment survives the cut')
+  assert.ok(entry.markdown.length < 1400)
 })

@@ -17,6 +17,34 @@ const GRACE_MS = 3000
 const STDOUT_MAX_BYTES = 512 * 1024
 const STDERR_MAX_BYTES = 64 * 1024
 
+/**
+ * Byte ceiling for one `--data=` argument.
+ *
+ * Content travels as a single argv element. Linux rejects any one argument over
+ * 128 KiB (`MAX_ARG_STRLEN`) with E2BIG, and macOS caps the whole argv near
+ * 1 MiB — so an unbounded payload (a pasted log, a huge tool result folded into
+ * a message) failed the spawn outright, retried, and ended as a failed task.
+ * 96 KiB leaves headroom for the rest of the command line.
+ */
+export const MAX_DATA_BYTES = 96 * 1024
+
+/**
+ * Trim `data` to fit one argv element, cutting on a UTF-8 boundary and saying
+ * so. Returns the input unchanged when it already fits.
+ * @param {string} data
+ * @returns {string}
+ */
+export function fitDataArgument(data) {
+  const bytes = Buffer.byteLength(data, 'utf8')
+  if (bytes <= MAX_DATA_BYTES) return data
+  const marker = `\n\n[...truncated ${bytes - MAX_DATA_BYTES} bytes to fit the command line]`
+  const budget = MAX_DATA_BYTES - Buffer.byteLength(marker, 'utf8')
+  // Decoding a prefix that ends mid-character yields U+FFFD; drop it rather
+  // than store a mangled final character.
+  const head = Buffer.from(data, 'utf8').subarray(0, budget).toString('utf8').replace(/\uFFFD+$/, '')
+  return head + marker
+}
+
 export class HypatiaCliError extends Error {
   /**
    * @param {string} message
@@ -168,7 +196,7 @@ export function createHypatiaCli(ctx, config) {
       // Use the `--data=<value>` form: consolidated content routinely begins
       // with a markdown bullet (`- …`), and a space-separated `-d <value>`
       // makes clap parse the leading `-` as a new flag (exit 2).
-      if (entry.data) argv.push(`--data=${entry.data}`)
+      if (entry.data) argv.push(`--data=${fitDataArgument(entry.data)}`)
       if (entry.tags && entry.tags.length > 0) argv.push('--tags', entry.tags.join(','))
       if (entry.scopes && entry.scopes.length > 0) argv.push('--scopes', entry.scopes.join(','))
       return runCreate(argv)
@@ -186,7 +214,7 @@ export function createHypatiaCli(ctx, config) {
       // Same `--data=` rationale as knowledgeCreate: statement payloads can
       // start with `-` (markdown bullets) which a space-separated value would
       // expose to clap's flag parsing.
-      if (entry.data) argv.push(`--data=${entry.data}`)
+      if (entry.data) argv.push(`--data=${fitDataArgument(entry.data)}`)
       if (entry.scopes && entry.scopes.length > 0) argv.push('--scopes', entry.scopes.join(','))
       return runCreate(argv)
     },

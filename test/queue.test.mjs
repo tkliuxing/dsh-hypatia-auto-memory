@@ -357,14 +357,14 @@ test('registering an executor leaves deferred tasks for their session', async ()
   assert.deepEqual(ran, ['a'])
 })
 
-test('pruneFailed removes only failed records of the named kinds', () => {
+test('pruneFailed removes only failed records of the named kinds', async () => {
   const table = makeTable({
     'log-message:a': { kind: 'log-message', sessionId: 'a', status: 'failed', fromSeq: 0, toSeq: 1, attempts: 3 },
     'log-message:b': { kind: 'log-message', sessionId: 'b', status: 'pending', fromSeq: 0, toSeq: 1, attempts: 0 },
     'consolidate:a': { kind: 'consolidate', sessionId: 'a', status: 'failed', fromSeq: 0, toSeq: 1, attempts: 3 },
   })
   const queue = createQueue({ tasks: table, getConfig: () => CONFIG, status: makeStatus() })
-  assert.equal(queue.pruneFailed(['log-message']), 1)
+  assert.equal(await queue.pruneFailed(['log-message']), 1)
   assert.equal(table.get('log-message:a'), undefined)
   assert.ok(table.get('log-message:b'), 'unfinished work untouched')
   assert.ok(table.get('consolidate:a'), 'other kinds keep their failure for inspection')

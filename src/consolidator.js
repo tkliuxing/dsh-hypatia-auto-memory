@@ -14,8 +14,8 @@
  * @module dsh-hypatia-auto-memory/consolidator
  */
 
-import { absolutizeDates, blocksToText, flattenToolResult, redactSecrets } from './content-policy.js'
-import { countLoggableMessages, isLoggableMessage } from './collector.js'
+import { absolutizeDates, blocksToText, eventDate, flattenToolResult, redactSecrets } from './content-policy.js'
+import { countLoggableMessages, isCompactionReplacement, isLoggableMessage } from './collector.js'
 import { messageName, summaryName } from './writer.js'
 import { EMPTY_PROGRESS, advanceProgress } from './progress.js'
 import { TaskDeferredError } from './queue.js'
@@ -143,12 +143,16 @@ function consolidationInstruction(maxWorkUnits) {
  *
  * @param {readonly any[]} events
  * @param {{maxInputTokens: number}} config
- * @param {Date} now - write time relative dates are absolutized against.
+ * @param {Date} now - base for relative dates in an event that carries no
+ *   timestamp; otherwise each line is resolved against its own event's time.
+ * @param {{before?: any}} [context] - the event just ahead of the span, so a
+ *   leading compaction replacement is recognised (it restates an old result).
  * @returns {{text: string, lastSeq: number, complete: boolean}} `lastSeq` is the
  * seq of the last event included; `complete` is false when the budget forced
  * later events out of this run.
  */
-export function buildTranscript(events, config, now = new Date()) {
+export function buildTranscript(events, config, now = new Date(), { before } = {}) {
+  const bySeq = new Map(events.map((event) => [event.seq, event]))
   // Tool results cite their call by id; the readable name lives on the call.
   const toolNames = new Map()
   for (const event of events) {
@@ -157,23 +161,24 @@ export function buildTranscript(events, config, now = new Date()) {
     }
   }
 
-  const clean = (raw) => absolutizeDates(redactSecrets(String(raw)), now).trim()
+  const clean = (raw, event) => absolutizeDates(redactSecrets(String(raw)), eventDate(event, now)).trim()
 
   /** @type {Array<{seq: number, line: string}>} */
   const entries = []
   for (const event of events) {
     if (event.type === 'user/message') {
       if (event.data?.source?.kind !== 'user') continue
-      const text = clean(blocksToText(event.data?.content ?? []))
+      const text = clean(blocksToText(event.data?.content ?? []), event)
       if (text !== '') entries.push({ seq: event.seq, line: `U: ${text}` })
     } else if (event.type === 'assistant/message') {
-      const text = clean(blocksToText(event.data?.message?.content ?? []))
+      const text = clean(blocksToText(event.data?.message?.content ?? []), event)
       if (text !== '') entries.push({ seq: event.seq, line: `A: ${text}` })
     } else if (event.type === 'tool/result') {
+      if (isCompactionReplacement(event, bySeq, before)) continue
       const callId = event.data?.message?.source?.callId
       const name = toolNames.get(callId) ?? 'tool'
       const ok = event.data?.error === undefined
-      const first = clean(flattenToolResult(event)).split('\n')[0] ?? ''
+      const first = clean(flattenToolResult(event), event).split('\n')[0] ?? ''
       entries.push({ seq: event.seq, line: `T: ${name} ${ok ? '✅' : '❌'} ${first}`.trimEnd() })
     }
   }
@@ -463,16 +468,17 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
     const inherited = session.inheritedEventCount ?? 0
     const fromSeq = Math.max(task.fromSeq, inherited)
     if (task.toSeq <= fromSeq) {
-      advanceProgress(progress, task.sessionId, (current) => ({
+      await advanceProgress(progress, task.sessionId, (current) => ({
         lastConsolidatedSeq: Math.max(current.lastConsolidatedSeq, fromSeq),
       }))
       return
     }
     const events = session.snapshotEvents(fromSeq, task.toSeq)
     const now = new Date()
-    const { text: transcript, lastSeq, complete } = buildTranscript(events, consolidation, now)
+    const before = fromSeq > 0 ? session.snapshotEvents(fromSeq - 1, fromSeq)[0] : undefined
+    const { text: transcript, lastSeq, complete } = buildTranscript(events, consolidation, now, { before })
     if (transcript.trim() === '') {
-      advanceProgress(progress, task.sessionId, () => ({ lastConsolidatedSeq: task.toSeq }))
+      await advanceProgress(progress, task.sessionId, () => ({ lastConsolidatedSeq: task.toSeq }))
       return
     }
     // Only the span the transcript actually carried is consolidated. An
@@ -559,7 +565,7 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
         status.info(`work unit stored: ${result.name}`)
       }
     }
-    advanceProgress(progress, task.sessionId, () => ({ lastConsolidatedSeq: coveredToSeq }))
+    await advanceProgress(progress, task.sessionId, () => ({ lastConsolidatedSeq: coveredToSeq }))
     // A fresh tier-1 summary may complete a batch of sixteen, so give the
     // cascade a chance to run. It is its own task so a cascade failure can never
     // roll back a consolidation that already succeeded.

@@ -98,16 +98,41 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
     for (const waiter of pending) waiter(false)
   }
 
+  /** @type {Map<string, Promise<string>>} in-flight persist per task id */
+  const persisting = new Map()
+
   /**
    * Load-or-create the durable record, absorbing the range into an existing
    * pending task of the same (kind, session) when present.
-   * @returns {Promise<string>} the task id
+   *
+   * Two properties of the storage table shape this:
+   *
+   * - A write lands in memory only once it is durable: `put`/`update` queue the
+   *   write and resolve after it, and `get` sees nothing until then. Returning
+   *   before the write landed let `runTask` look the id up, find nothing, and
+   *   return — a freshly enqueued immediate task silently never ran and sat in
+   *   the table as `pending`. Every write here is awaited.
+   * - Two enqueues of one id interleaving would each see "no record" and each
+   *   `put`, the later one discarding the earlier range. Persists of one id are
+   *   therefore chained.
+   *
+   * @returns {Promise<string>} the task id, once its record is readable.
    */
-  async function persistTask(spec) {
+  function persistTask(spec) {
     const id = taskId(spec.kind, spec.sessionId)
+    const previous = persisting.get(id) ?? Promise.resolve()
+    const next = previous.catch(() => {}).then(() => writeTask(id, spec))
+    persisting.set(id, next)
+    next.catch(() => {}).finally(() => {
+      if (persisting.get(id) === next) persisting.delete(id)
+    })
+    return next
+  }
+
+  async function writeTask(id, spec) {
     const existing = tasks.get(id)
     if (existing !== undefined && existing.status !== 'failed') {
-      tasks.update(id, (t) => ({
+      await tasks.update(id, (t) => ({
         ...t,
         fromSeq: Math.min(t.fromSeq, spec.fromSeq),
         toSeq: Math.max(t.toSeq, spec.toSeq),
@@ -115,7 +140,7 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
       }))
       return id
     }
-    tasks.put(id, {
+    await tasks.put(id, {
       kind: spec.kind,
       sessionId: spec.sessionId,
       fromSeq: spec.fromSeq,
@@ -161,7 +186,7 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
     }
     if ((await acquire()) === false) return
     try {
-      tasks.update(id, (t) => ({ ...t, status: 'running' }))
+      await tasks.update(id, (t) => ({ ...t, status: 'running' }))
       try {
         const snapshot = tasks.get(id)
         await executor(snapshot)
@@ -174,7 +199,7 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
         const grewForward = latest !== undefined && latest.toSeq > snapshot.toSeq
         const grewBackward = latest !== undefined && latest.fromSeq < snapshot.fromSeq
         if (grewForward || grewBackward) {
-          tasks.update(id, (t) => ({
+          await tasks.update(id, (t) => ({
             ...t,
             // Forward growth re-runs only the uncovered tail. Backward growth
             // (a backfill reaching under this task) re-runs the whole widened
@@ -186,12 +211,12 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
           }))
           followups.add(id)
         } else {
-          tasks.delete(id)
+          await tasks.delete(id)
         }
         status.count('tasksDone')
       } catch (error) {
         if (error?.deferred === true) {
-          tasks.update(id, (t) => ({
+          await tasks.update(id, (t) => ({
             ...t,
             status: 'deferred',
             error: error instanceof Error ? error.message : String(error),
@@ -206,7 +231,7 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
           : (tasks.get(id)?.attempts ?? record.attempts) + 1
         const config = getConfig()
         if (attempts < config.maxAttempts) {
-          tasks.update(id, (t) => ({
+          await tasks.update(id, (t) => ({
             ...t,
             status: 'pending',
             attempts,
@@ -215,7 +240,7 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
           status.warn(`task ${id} failed (attempt ${attempts}), retrying: ${String(error)}`)
           setTimer(id, () => schedule(id), config.retryDelayMs)
         } else {
-          tasks.update(id, (t) => ({
+          await tasks.update(id, (t) => ({
             ...t,
             status: 'failed',
             attempts,
@@ -335,15 +360,15 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
      * but an error message. Called once at startup, so the message survives for
      * the whole run that produced it.
      * @param {readonly string[]} kinds
-     * @returns {number} how many records were removed.
+     * @returns {Promise<number>} how many records were removed, once removed.
      */
-    pruneFailed(kinds) {
+    async pruneFailed(kinds) {
       if (typeof tasks.entries !== 'function') return 0
       const ids = []
       for (const [id, record] of tasks.entries()) {
         if (record?.status === 'failed' && kinds.includes(record.kind)) ids.push(id)
       }
-      for (const id of ids) tasks.delete(id)
+      for (const id of ids) await tasks.delete(id)
       return ids.length
     },
 

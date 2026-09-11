@@ -11,7 +11,7 @@ import { createCollector } from '../src/collector.js'
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
-function makeHarness({ checkEveryTurns = 3, minNewTokens = 100 } = {}) {
+function makeHarness({ checkEveryTurns = 3, minNewTokens = 100, flushWindowMs = 0 } = {}) {
   const progressRows = new Map()
   const progress = {
     get: (id) => progressRows.get(id),
@@ -58,7 +58,7 @@ function makeHarness({ checkEveryTurns = 3, minNewTokens = 100 } = {}) {
     ctx,
     queue,
     progress,
-    getConfig: () => ({ collector: { enabled: true }, queue: { flushWindowMs: 0 } }),
+    getConfig: () => ({ collector: { enabled: true }, queue: { flushWindowMs } }),
     status: { error: () => {}, info: () => {} },
     onTurnEnd,
     onSessionEnd: async (sessionId, session) => { sessionEnds.push({ sessionId, seq: session.seq }) },
@@ -248,4 +248,25 @@ test('a session coming back resumes the tasks deferred for it', () => {
   const h = makeHarness()
   h.reopen()
   assert.deepEqual(h.resumed, ['s1'])
+})
+
+test('the fallback flush is armed at step/end, never on a message', async () => {
+  // `step/end` comes after the step's tools, so a fallback span always ends on a
+  // complete step and no assistant entry is written without its own results.
+  const h = makeHarness({ flushWindowMs: 120_000 })
+  await h.collector.projectFor(h.session)
+  h.emit({ type: 'user/message', seq: 1, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] } })
+  h.emit({ type: 'assistant/message', seq: 2, data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'calling' }] } } })
+  h.emit({ type: 'tool/call', seq: 3, data: { turn: 1, step: 1, callId: 'c1', name: 'grep' } })
+  await flush()
+  assert.deepEqual(h.enqueued, [], 'messages alone arm nothing')
+
+  h.emit({ type: 'tool/result', seq: 4, data: { turn: 1, step: 1, message: { source: { callId: 'c1' }, content: [] } } })
+  h.emit({ type: 'step/end', seq: 5, data: { turn: 1, step: 1 } })
+  await flush()
+  assert.deepEqual(
+    [h.enqueued[0].fromSeq, h.enqueued[0].toSeq, h.enqueued[0].immediate],
+    [0, 6, false],
+    'a windowed span ending on the step boundary',
+  )
 })

@@ -51,15 +51,18 @@ session/disposed ──▶ final flush + consolidation, thresholds waived
 agent/session-start ──▶ rules/taboos inject()
 ```
 
-- **Collector** records human `user/message` and `assistant/message` (with a
-  collapsed tool ledger per turn), redacts secrets, absolutizes relative
-  dates, caps assistant text, and enqueues idempotent log tasks. Plugin-sourced
+- **Collector** records human `user/message` and `assistant/message` (each
+  assistant message with a collapsed ledger of its own step's tool calls),
+  redacts secrets, rewrites relative dates against the time the message was
+  sent, caps both user and assistant text, and enqueues idempotent log tasks. Plugin-sourced
   messages are skipped — no feedback loops.
 
-  Spans are cut at `turn/end`, never on a timer. DSH appends `assistant/message`
-  *before* running the tools it requested, so a mid-turn cut separates a message
-  from its own tool results — and since a ledger is only emitted next to an
-  assistant message, those results were then dropped rather than merely delayed.
+  Spans are cut at `turn/end`, and — for a turn that outlasts `flushWindowMs` —
+  at `step/end`, never at an arbitrary moment. DSH appends `assistant/message`
+  *before* running the tools it requested and `step/end` only after they have
+  all run, so a span always holds whole steps and no entry is written without
+  its own tool results. Tool results that DSH compaction re-appends after a
+  `compaction/prune` are copies of old results and are not counted again.
 
   Entries are named by a **dense message ordinal**, not a session-log seq: DSH
   gives every streamed token delta its own seq, so seq numbering produced a
@@ -113,6 +116,7 @@ hypatia-auto-memory:
   collector:
     enabled: true
     maxAssistantChars: 8000      # per-message cap before truncation marker
+    maxUserChars: 32000          # same, for what the user typed or pasted
     toolLedger: true             # collapse repeated tool calls
   consolidation:
     enabled: true
@@ -134,8 +138,8 @@ hypatia-auto-memory:
     concurrency: 1               # parallel sessions
     maxAttempts: 3
     retryDelayMs: 5000
-    # NOT a batching knob. Spans are cut at turn/end; this only bounds how much
-    # a crash can lose from a turn that is still running.
+    # NOT a batching knob. Spans are cut at turn/end; for a turn still running
+    # this long, the next step/end flushes what is complete so far.
     flushWindowMs: 120000
   recall:
     enabled: true
@@ -170,7 +174,7 @@ The cordis config block on the bundle row only carries skill packaging:
 |---|---|
 | No entries after chatting | `enabled: false`, missing `hypatia` binary, or the collect fiber PENDING (needs `sessions`, `storageDomain`, `subprocess`, `settings` from the base composition) — check profile logs |
 | Nothing logged for a whole run after a restart | The storage domain refused to open because a stored record failed its schema. The storage service validates on read, not on write, so a bad write only surfaces at the next startup — and one bad row fails the whole domain. Look for `startup failed` / `does not match its schema` in the profile log. Task rows missing `error` are now defaulted; for any other bad row, stop DSH, remove it from `~/.dsh/storages/hypatia_auto_memory.json`, and restart |
-| Entries appear only after a turn finishes | By design: spans are cut at `turn/end` so a tool ledger stays with its assistant message |
+| Entries appear only after a turn finishes | By design: spans are cut at `turn/end`, or at the first `step/end` once a turn has run longer than `flushWindowMs`, so an entry never lacks its own tool results |
 | Logging works, no summaries | `consolidation.models` is empty or invalid — one warning at first trigger |
 | Summaries but no `sum2-*` | Fewer than `cascade.batchSize` unarchived tier-1 summaries in that project yet |
 | Work units have no relationships | No embedding model on the shelf (`similar` fails), or every candidate was beyond `dedupMaxDistance` |

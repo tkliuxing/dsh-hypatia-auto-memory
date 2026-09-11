@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createHypatiaCli } from '../src/hypatia-cli.js'
+import { MAX_DATA_BYTES, fitDataArgument, createHypatiaCli } from '../src/hypatia-cli.js'
 
 /**
  * Minimal subprocess-service stub: captures argv, resolves done with a
@@ -49,4 +49,15 @@ test('statementCreate passes content via --data= for dash-leading payloads', asy
   const argv = calls[0]
   assert.ok(argv.includes('--data=- carried note'))
   assert.ok(!argv.includes('-d'))
+})
+
+test('fitDataArgument keeps one argv element under the byte ceiling', () => {
+  // Content travels as a single argv element: Linux rejects any one argument
+  // over 128 KiB with E2BIG, which used to fail the spawn and the task.
+  const cjk = '中'.repeat(60_000) // 180,000 bytes of UTF-8
+  const out = fitDataArgument(cjk)
+  assert.ok(Buffer.byteLength(out, 'utf8') <= MAX_DATA_BYTES)
+  assert.ok(!out.includes('\uFFFD'), 'cut on a character boundary')
+  assert.match(out, /\[\.\.\.truncated \d+ bytes to fit the command line\]$/)
+  assert.equal(fitDataArgument('small'), 'small')
 })

@@ -79,6 +79,22 @@ const DAY_MS = 86_400_000
 const HOUR_MS = 3_600_000
 const MINUTE_MS = 60_000
 
+/**
+ * The moment an event happened, as the base for resolving relative dates in it.
+ *
+ * "明天" means the day after the message was SENT, not the day after it was
+ * written to memory. The two differ by minutes when a span waits for its turn
+ * to end, and by days when a task is deferred until its session is reopened —
+ * absolutizing against write time would then record the wrong date outright.
+ *
+ * @param {{time?: number} | undefined} event
+ * @param {Date} fallback - used when the event carries no usable timestamp.
+ * @returns {Date}
+ */
+export function eventDate(event, fallback) {
+  return typeof event?.time === 'number' && Number.isFinite(event.time) ? new Date(event.time) : fallback
+}
+
 /** Monday of the ISO week containing `d`. */
 function weekMonday(d) {
   const copy = new Date(d.getTime())

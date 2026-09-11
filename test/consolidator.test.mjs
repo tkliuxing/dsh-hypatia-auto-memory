@@ -56,19 +56,22 @@ test('buildTranscript unwraps nested tool-result blocks', () => {
 })
 
 test('buildTranscript redacts secrets and absolutizes dates before the model call', () => {
+  // Written a week after it was said: "today" is the day it was SAID.
   const now = new Date('2025-09-09T12:00:00')
+  const said = new Date('2025-09-01T10:00:00').getTime()
   const events = [
     ev('user/message', 1, {
       source: { kind: 'user' },
       content: [{ type: 'text', text: 'deploy today with sk-abcdef1234567890XYZ and password="hunter22"' }],
-    }),
+    }, said),
   ]
   const { text: out } = buildTranscript(events, { maxInputTokens: 10000 }, now)
   assert.ok(!out.includes('sk-abcdef1234567890XYZ'), out)
   assert.ok(!out.includes('hunter22'), out)
   assert.ok(out.includes('[REDACTED:secret:key]'), out)
   assert.ok(out.includes('[REDACTED:secret:credential]'), out)
-  assert.ok(out.includes('2025-09-09'), out)
+  assert.ok(out.includes('deploy 2025-09-01 with'), out)
+  assert.ok(!out.includes('2025-09-09'), 'not the consolidation time')
 })
 
 test('buildTranscript marks failed tools', () => {

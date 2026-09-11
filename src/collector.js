@@ -17,6 +17,7 @@ import {
   blocksToText,
   capAssistant,
   estimateTokens,
+  eventDate,
   flattenToolResult,
   oneLineError,
   redactSecrets,
@@ -222,6 +223,21 @@ export function createCollector({ ctx, queue, progress, getConfig, status, onTur
         })
         return
       }
+      if (event.type === 'step/end') {
+        // The fallback flush is armed here rather than on each message.
+        // `step/end` is appended once the step's tools have all run, so a span
+        // cut at one never separates an assistant message from its own tool
+        // results. Arming it on the message instead meant a turn longer than
+        // the window was cut mid-step, and every entry written before the cut
+        // kept a partial tool ledger for good (entries are never rewritten).
+        const window = getConfig().queue?.flushWindowMs ?? 0
+        if (window > 0) {
+          void enqueueUnlogged(session, event.seq + 1).catch((error) => {
+            status.error('collector failed to arm the fallback flush', error)
+          })
+        }
+        return
+      }
       if (event.type === 'turn/end') {
         const id = sessionIdOf(session)
         const turn = event.data?.turn ?? 0
@@ -254,31 +270,23 @@ export function createCollector({ ctx, queue, progress, getConfig, status, onTur
           reason: event.data?.reason,
         }))
           .then((decision) => {
-            advanceProgress(progress, id, (current) => ({
+            if (decision?.resetTokens === true) pendingTokens.delete(id)
+            return advanceProgress(progress, id, (current) => ({
               lastCheckTurn: decision?.advanceCheckpoint === true ? turn : current.lastCheckTurn,
               pendingTokens: decision?.resetTokens === true ? 0 : tokens,
             }))
-            if (decision?.resetTokens === true) pendingTokens.delete(id)
           })
           .catch((error) => {
             status.error('consolidation trigger failed', error)
-            advanceProgress(progress, id, () => ({ pendingTokens: tokens }))
+            return advanceProgress(progress, id, () => ({ pendingTokens: tokens }))
           })
       }
       return
     }
     if (event.type === 'user/message' && !isHumanMessage(event)) return
     accrueTokens(session, event)
-    // No enqueue here: the span is cut at `turn/end` (see above). The
-    // flush-window fallback below only covers a turn that runs long enough that
-    // waiting for its end would risk losing work to a crash.
-    if (event.type !== 'assistant/message' && event.type !== 'user/message') return
-    const window = getConfig().queue?.flushWindowMs ?? 0
-    if (window > 0) {
-      void enqueueUnlogged(session, event.seq + 1).catch((error) => {
-        status.error('collector failed to arm the fallback flush', error)
-      })
-    }
+    // No enqueue here: spans are cut at `step/end` (the fallback) and at
+    // `turn/end`, both handled above.
   }
 
   ctx.on('session/event', listener)
@@ -379,24 +387,33 @@ export function createCollector({ ctx, queue, progress, getConfig, status, onTur
  * Exported for the queue executor and for tests.
  *
  * @param {readonly any[]} events - events exactly as recorded (with seq/time/data).
- * @param {{now?: Date, maxAssistantChars?: number, toolLedger?: boolean, baseIndex?: number}} [policy]
+ * @param {{now?: Date, maxAssistantChars?: number, maxUserChars?: number,
+ *          toolLedger?: boolean, baseIndex?: number, before?: any}} [policy]
  * `baseIndex` is the dense message ordinal the first entry of this span takes;
- * see {@link countLoggableMessages}.
+ * see {@link countLoggableMessages}. `before` is the event just ahead of the
+ * span, which decides whether a leading `tool/result` is a compaction
+ * replacement (see {@link isCompactionReplacement}). `now` is only the fallback
+ * base for relative dates in an event that carries no timestamp.
  * @returns {Array<{seq: number, index: number, role: string, markdown: string, tokens: number}>}
  */
 export function formatSpan(events, policy = {}) {
   const now = policy.now ?? new Date()
   const maxAssistantChars = policy.maxAssistantChars ?? 8000
+  const maxUserChars = policy.maxUserChars ?? 32000
   const toolLedger = policy.toolLedger !== false
   let index = policy.baseIndex ?? 0
   const bySeq = new Map(events.map((e) => [e.seq, e]))
 
-  // Pass 1: pair tool/call with tool/result inside this span -> ledger by turn.
-  /** @type {Map<number, Array<{name: string, line: string}>>} */
-  const ledgerByTurn = new Map()
+  // Pass 1: pair tool/call with tool/result inside this span -> ledger by step.
+  // A step is one model call plus the tools it requested, so a step is exactly
+  // what one assistant message's ledger should cover. Keying by turn instead
+  // hung the whole turn's tool activity on every assistant message in it.
+  /** @type {Map<string, Array<{name: string, line: string}>>} */
+  const ledgerByStep = new Map()
   if (toolLedger) {
     for (const event of events) {
       if (event.type !== 'tool/result') continue
+      if (isCompactionReplacement(event, bySeq, policy.before)) continue
       const callId = event.data?.message?.source?.callId
       const call = callId === undefined ? undefined : bySeq.get(findCallSeq(events, callId))
       const name = call?.data?.name ?? 'tool'
@@ -408,10 +425,10 @@ export function formatSpan(events, policy = {}) {
         const text = flattenToolResult(event)
         line = text.trim() === '' ? '✅' : `✅ ${oneLineError(text)}`
       }
-      const turn = event.data?.turn ?? 0
-      const list = ledgerByTurn.get(turn) ?? []
+      const key = stepKey(event)
+      const list = ledgerByStep.get(key) ?? []
       list.push({ name, line })
-      ledgerByTurn.set(turn, list)
+      ledgerByStep.set(key, list)
     }
   }
 
@@ -422,7 +439,11 @@ export function formatSpan(events, policy = {}) {
 
     const role = event.type === 'user/message' ? 'user' : 'assistant'
     const raw = role === 'user' ? blocksToText(event.data?.content ?? []) : blocksToText(event.data?.message?.content ?? [])
-    const redacted = absolutizeDates(redactSecrets(role === 'assistant' ? capAssistant(raw, maxAssistantChars) : raw), now)
+    // Redact BEFORE capping: a cut landing inside a secret would otherwise leave
+    // a fragment too short for the patterns to recognise. Relative dates are
+    // resolved against when the message was sent, not when it is written.
+    const limit = role === 'assistant' ? maxAssistantChars : maxUserChars
+    const redacted = absolutizeDates(capAssistant(redactSecrets(raw), limit), eventDate(event, now))
     const interrupted = event.type === 'assistant/message' && event.data?.interrupted === true
 
     const sections = [
@@ -440,7 +461,7 @@ export function formatSpan(events, policy = {}) {
     }
     sections.push('## Content', redacted + (interrupted ? '\n\n[turn interrupted mid-stream]' : ''))
 
-    const ledger = ledgerByTurn.get(event.data?.turn ?? 0)
+    const ledger = ledgerByStep.get(stepKey(event))
     if (role === 'assistant' && ledger !== undefined && ledger.length > 0) {
       // Collapse repeated identical tool lines into `name ×N`.
       const collapsed = collapseLedger(ledger)
@@ -452,6 +473,32 @@ export function formatSpan(events, policy = {}) {
     index += 1
   }
   return formatted
+}
+
+/** Ledger key: tool activity belongs to the step that requested it. */
+function stepKey(event) {
+  return `${event.data?.turn ?? 0}:${event.data?.step ?? 0}`
+}
+
+/**
+ * Whether a `tool/result` is a compaction replacement rather than a tool outcome.
+ *
+ * When DSH compaction prunes an old tool result it appends a replacement copy of
+ * it IMMEDIATELY after its `compaction/prune` event — the adjacency is
+ * contractual in dsh-compaction. The copy carries the original turn/step, often
+ * tens of thousands of events after that step ended, so it restates something
+ * already recorded. Treating it as new activity would re-add it to a ledger or a
+ * transcript, and it is the only way a result ever follows its own `step/end`.
+ *
+ * @param {any} event
+ * @param {Map<number, any>} bySeq - events of the span, by seq.
+ * @param {any} [before] - the event just ahead of the span, if known.
+ * @returns {boolean}
+ */
+export function isCompactionReplacement(event, bySeq, before) {
+  if (event?.type !== 'tool/result') return false
+  const previous = bySeq.get(event.seq - 1) ?? (before?.seq === event.seq - 1 ? before : undefined)
+  return previous?.type === 'compaction/prune'
 }
 
 /** Locate the tool/call seq for one callId within the span. */

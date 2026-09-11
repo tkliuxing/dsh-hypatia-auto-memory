@@ -18,7 +18,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { absolutizeDates, blocksToText, redactSecrets } from './content-policy.js'
+import { absolutizeDates, blocksToText, eventDate, redactSecrets } from './content-policy.js'
 import { installConfig } from './config.js'
 import { openState } from './state.js'
 import { EMPTY_PROGRESS, advanceProgress } from './progress.js'
@@ -182,8 +182,10 @@ function applyCollect(ctx, cordisConfig) {
       const formatted = formatSpan(events, {
         now: new Date(),
         maxAssistantChars: config.collector.maxAssistantChars,
+        maxUserChars: config.collector.maxUserChars,
         toolLedger: config.collector.toolLedger,
         baseIndex,
+        before: task.fromSeq > 0 ? session.snapshotEvents(task.fromSeq - 1, task.fromSeq)[0] : undefined,
       })
       for (const item of formatted) {
         await writer.writeMessage({
@@ -207,7 +209,9 @@ function applyCollect(ctx, cordisConfig) {
           linkTo,
         })
       }
-      advanceProgress(state.progress, task.sessionId, (current) => ({
+      // Awaited: the task must not be reported done — and deleted — before the
+      // watermark that makes its range unnecessary is durable.
+      await advanceProgress(state.progress, task.sessionId, (current) => ({
         lastLoggedSeq: Math.max(current.lastLoggedSeq, task.toSeq),
         lastBelongToIndex: current.hasSessionNode === 1
           ? Math.max(current.lastBelongToIndex, linkTo)
@@ -229,7 +233,7 @@ function applyCollect(ctx, cordisConfig) {
       const summary = event.type === 'session/title'
         ? String(event.data?.title ?? '')
         : blocksToText(event.data?.summary ?? [])
-      const markdown = absolutizeDates(redactSecrets(summary), new Date()).trim()
+      const markdown = absolutizeDates(redactSecrets(summary), eventDate(event, new Date())).trim()
       // The protocol forbids inventing a session summary: no text, no node.
       if (markdown === '') return
 
@@ -243,7 +247,7 @@ function applyCollect(ctx, cordisConfig) {
         linkFrom: current.lastBelongToIndex,
         linkTo,
       })
-      advanceProgress(state.progress, task.sessionId, (progressRow) => ({
+      await advanceProgress(state.progress, task.sessionId, (progressRow) => ({
         hasSessionNode: 1,
         lastBelongToIndex: Math.max(progressRow.lastBelongToIndex, linkTo),
       }))
@@ -252,7 +256,7 @@ function applyCollect(ctx, cordisConfig) {
     // Failed log-message records carry nothing the watermark does not: the range
     // was never marked logged, so the session's next flush covers it again.
     // Pruned at startup so the error message survives the run that produced it.
-    const pruned = queue.pruneFailed(['log-message'])
+    const pruned = await queue.pruneFailed(['log-message'])
     if (pruned > 0) status.info(`pruned ${pruned} failed log-message task(s); the watermarks re-derive their ranges`)
 
     await collector.backfillLiveSessions()
