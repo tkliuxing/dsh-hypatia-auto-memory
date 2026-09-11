@@ -1,0 +1,16 @@
+# dsh-hypatia-auto-memory bundle patch: inserts the plugin row into the
+# profile roster over dsh-base. Installed with
+#   dsh plugin --profile <name> add dsh-hypatia-auto-memory          (registry)
+#   dsh plugin --profile <name> add link:/path/to/dsh-hypatia-auto-memory
+#
+# Behavior is configured through the `hypatia-auto-memory` settings namespace
+# (settings.yaml / Web settings), NOT through this config block. The only
+# cordis-level knobs are the bundled skill:
+#
+#   - id: hypatia-auto-memory
+#     config:
+#       skills: true             # register the DSH-specific hypatia-memory skill
+#       skillsDir: /abs/path     # override the packaged skills/ directory
+- insert:
+    - id: hypatia-auto-memory
+      name: dsh-hypatia-auto-memory

@@ -1,0 +1,306 @@
+/**
+ * Persistent work queue for auto-memory tasks.
+ *
+ * Design properties:
+ * - Durable before scheduled: every task is written to the state domain
+ *   before any timer starts, so a crash never loses an accepted unit of work.
+ * - Per-session ordering: tasks of one session run on one promise chain;
+ *   cross-session concurrency is bounded by `queue.concurrency`.
+ * - Coalescing: a pending task absorbs adjacent ranges of the same
+ *   (kind, session), collapsing burst writes into fewer runs.
+ * - Crash convergence: executors are idempotent (get-before-create writer),
+ *   and backfill re-enqueues unfinished ranges under the same task id, so a
+ *   replay converges instead of duplicating.
+ * - Dispose: timers cleared, in-flight chains awaited up to a deadline;
+ *   everything not finished stays durable for the next boot.
+ *
+ * @module dsh-hypatia-auto-memory/queue
+ */
+
+const DISPOSE_DEADLINE_MS = 5000
+
+/**
+ * @param {{
+ *   tasks: any,                 // storageDomain tasks table
+ *   getConfig: () => {concurrency: number, maxAttempts: number, retryDelayMs: number, flushWindowMs: number},
+ *   executors: Record<string, (task: any) => Promise<void>>,
+ *   status: import('./status.js').StatusLog,
+ *   now?: () => number,
+ * }} deps
+ */
+export function createQueue({ tasks, getConfig, executors = {}, status, now = Date.now }) {
+  /** @type {Map<string, Promise<void>>} one chain per session */
+  const chains = new Map()
+  /** @type {Map<string, NodeJS.Timeout>} flush-window timers, key = task id */
+  const timers = new Map()
+  /** @type {Set<string>} task ids currently on a chain */
+  const scheduled = new Set()
+  /** @type {Set<string>} ids that absorbed new work mid-run and must run again */
+  const followups = new Set()
+  let running = 0
+  let waiters = []
+  let disposed = false
+
+  const taskId = (kind, sessionId) => `${kind}:${sessionId}`
+
+  /**
+   * Take one of the `concurrency` slots.
+   * @returns {Promise<boolean>} true when a slot was granted; false when dispose
+   * cancelled the wait, in which case the caller must NOT release.
+   */
+  const acquire = () => new Promise((resolve) => {
+    // Deliberately NOT short-circuiting on `disposed`: dispose's contract is to
+    // await in-flight work, and a task already on a chain counts as in-flight.
+    // Only waiters still queued for a slot are cancelled, by `cancelWaiters`.
+    if (running < getConfig().concurrency) {
+      running += 1
+      resolve(true)
+      return
+    }
+    waiters.push((granted) => {
+      if (granted) running += 1
+      resolve(granted)
+    })
+  })
+
+  /** Hand the freed slot to exactly one waiter — never more. */
+  const release = () => {
+    running -= 1
+    const next = waiters.shift()
+    if (next) next(true)
+  }
+
+  /** Dispose only: drop every queued waiter without granting it a slot. */
+  const cancelWaiters = () => {
+    const pending = waiters
+    waiters = []
+    for (const waiter of pending) waiter(false)
+  }
+
+  /**
+   * Load-or-create the durable record, absorbing the range into an existing
+   * pending task of the same (kind, session) when present.
+   * @returns {Promise<string>} the task id
+   */
+  async function persistTask(spec) {
+    const id = taskId(spec.kind, spec.sessionId)
+    const existing = tasks.get(id)
+    if (existing !== undefined && existing.status !== 'failed') {
+      tasks.update(id, (t) => ({
+        ...t,
+        fromSeq: Math.min(t.fromSeq, spec.fromSeq),
+        toSeq: Math.max(t.toSeq, spec.toSeq),
+        project: spec.project || t.project,
+      }))
+      return id
+    }
+    tasks.put(id, {
+      kind: spec.kind,
+      sessionId: spec.sessionId,
+      fromSeq: spec.fromSeq,
+      toSeq: spec.toSeq,
+      project: spec.project,
+      status: 'pending',
+      attempts: 0,
+      enqueuedAt: now(),
+    })
+    return id
+  }
+
+  /** Schedule one persisted task onto its session chain. */
+  function schedule(id) {
+    if (disposed || scheduled.has(id)) return
+    scheduled.add(id)
+    const sessionId = id.slice(id.indexOf(':') + 1)
+    const prev = chains.get(sessionId) ?? Promise.resolve()
+    const next = prev
+      .catch(() => {})
+      .then(() => runTask(id))
+      .finally(() => {
+        scheduled.delete(id)
+        if (chains.get(sessionId) === next) chains.delete(sessionId)
+        // Re-schedule only AFTER leaving `scheduled`, otherwise the guard at the
+        // top of this function would swallow the follow-up run.
+        if (followups.delete(id)) schedule(id)
+      })
+    chains.set(sessionId, next)
+  }
+
+  /** Load, execute with retry bookkeeping, and settle one task. */
+  async function runTask(id) {
+    const record = tasks.get(id)
+    if (record === undefined || record.status === 'failed') return
+    const executor = executors[record.kind]
+    if (executor === undefined) {
+      status.error(`no executor for task kind "${record.kind}"`, new Error(id))
+      return
+    }
+    if ((await acquire()) === false) return
+    try {
+      tasks.update(id, (t) => ({ ...t, status: 'running' }))
+      try {
+        const snapshot = tasks.get(id)
+        await executor(snapshot)
+        // `enqueue` widens a running task's range in place, but cannot schedule
+        // it (the id is already in `scheduled`). Deleting unconditionally here
+        // therefore discarded everything that arrived mid-run — and because the
+        // log executor advances its watermark past what it DID cover, the gap
+        // became unreachable to boot backfill too. Compare before deleting.
+        const latest = tasks.get(id)
+        const grewForward = latest !== undefined && latest.toSeq > snapshot.toSeq
+        const grewBackward = latest !== undefined && latest.fromSeq < snapshot.fromSeq
+        if (grewForward || grewBackward) {
+          tasks.update(id, (t) => ({
+            ...t,
+            // Forward growth re-runs only the uncovered tail. Backward growth
+            // (a backfill reaching under this task) re-runs the whole widened
+            // range; writes are get-before-create, so replay converges.
+            fromSeq: grewBackward ? latest.fromSeq : snapshot.toSeq,
+            status: 'pending',
+            attempts: 0,
+            error: null,
+          }))
+          followups.add(id)
+        } else {
+          tasks.delete(id)
+        }
+        status.count('tasksDone')
+      } catch (error) {
+        // Permanent failures (e.g. malformed model output) get no retries —
+        // re-running an unhealable task only wedges the session chain.
+        const attempts = error?.permanent === true
+          ? getConfig().maxAttempts
+          : (tasks.get(id)?.attempts ?? record.attempts) + 1
+        const config = getConfig()
+        if (attempts < config.maxAttempts) {
+          tasks.update(id, (t) => ({
+            ...t,
+            status: 'pending',
+            attempts,
+            error: error instanceof Error ? error.message : String(error),
+          }))
+          status.warn(`task ${id} failed (attempt ${attempts}), retrying: ${String(error)}`)
+          setTimer(id, () => schedule(id), config.retryDelayMs)
+        } else {
+          tasks.update(id, (t) => ({
+            ...t,
+            status: 'failed',
+            attempts,
+            error: error instanceof Error ? error.message : String(error),
+          }))
+          status.count('tasksFailed')
+          status.error(`task ${id} failed permanently after ${attempts} attempts`, error)
+        }
+      }
+    } finally {
+      release()
+    }
+  }
+
+  function setTimer(id, fn, delay) {
+    if (disposed) return
+    const timer = setTimeout(() => {
+      timers.delete(id)
+      fn()
+    }, delay)
+    timers.set(id, timer)
+  }
+
+  return {
+    /** Register or replace the executor for one task kind (late binding). */
+    registerExecutor(kind, executor) {
+      executors[kind] = executor
+    },
+
+    /**
+     * Accept one unit of work: persist, then run after the flush window
+     * (which coalesces bursts). Resolves once the durable record exists.
+     */
+    async enqueue(spec) {
+      if (disposed) return
+      const id = await persistTask(spec)
+      // `immediate` skips the coalescing window for a span that is already known
+      // to be complete — a finished turn, or a session shutting down. Waiting
+      // would only delay it, and for a turn it risks the next arrival splitting
+      // a span that must stay whole.
+      const window = spec.immediate === true ? 0 : getConfig().flushWindowMs
+      if (spec.immediate === true) {
+        const pending = timers.get(id)
+        if (pending !== undefined) {
+          clearTimeout(pending)
+          timers.delete(id)
+        }
+      }
+      if (window > 0 && !scheduled.has(id)) {
+        if (!timers.has(id)) {
+          setTimer(id, () => schedule(id), window)
+        }
+      } else {
+        schedule(id)
+      }
+    },
+
+    /**
+     * Boot recovery is progress-driven, not table-scan-driven: the storage
+     * table deliberately has no enumeration, and the collector's backfill
+     * re-enqueues every uncovered range under the same task ids — persisting
+     * over any pending/running record a crash left behind — so replays
+     * converge without a scan. Kept as an explicit no-op to document that.
+     */
+    async requeueAll() {},
+
+    /** One task currently persisted for (kind, session), if any. */
+    peek(kind, sessionId) {
+      return tasks.get(taskId(kind, sessionId))
+    },
+
+    /**
+     * Resolve once this session has no work left in flight.
+     *
+     * Used to decide when a disposed session's object can be released: its
+     * executors still need `snapshotEvents` from it, and the store has already
+     * let go. Waiting on the chain alone is not enough — a task sitting on a
+     * retry timer holds no chain — so pending records are checked too.
+     *
+     * @param {string} sessionId
+     * @param {{timeoutMs?: number, kinds?: readonly string[]}} [options]
+     */
+    async whenIdle(sessionId, { timeoutMs = 60_000, kinds = ['log-message', 'consolidate'] } = {}) {
+      const deadline = now() + timeoutMs
+      while (now() < deadline) {
+        const chain = chains.get(sessionId)
+        if (chain !== undefined) {
+          await chain.catch(() => {})
+          continue
+        }
+        const outstanding = kinds.some((kind) => {
+          const record = tasks.get(taskId(kind, sessionId))
+          return record !== undefined && record.status !== 'failed'
+        })
+        if (!outstanding) return true
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      return false
+    },
+
+    pendingCount() {
+      return scheduled.size + timers.size + followups.size
+    },
+
+    /** Stop accepting work; await in-flight up to the deadline. */
+    async dispose() {
+      disposed = true
+      for (const timer of timers.values()) clearTimeout(timer)
+      timers.clear()
+      const pending = [...chains.values()]
+      await Promise.race([
+        Promise.allSettled(pending),
+        new Promise((resolve) => setTimeout(resolve, DISPOSE_DEADLINE_MS)),
+      ])
+      chains.clear()
+      scheduled.clear()
+      followups.clear()
+      cancelWaiters()
+    },
+  }
+}

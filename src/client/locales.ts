@@ -1,0 +1,87 @@
+/** `hypatia-auto-memory` namespace dictionaries. */
+
+/** Dictionary namespace owned by this plugin. */
+export const NS = 'hypatia-auto-memory'
+
+/** Simplified Chinese dictionary and key source of truth. */
+export const zh = {
+  loading: '正在加载 {ns} 设置…',
+  unavailable: '当前上下文不可用 {ns} 设置。',
+  title: 'Hypatia Auto Memory',
+  description:
+    '自动将对话轮次记录到 Hypatia，并在新内容足够多时通过独立模型路由进行后台整合。',
+  enable: '启用自动记忆',
+  consolidationTitle: '整合候选模型',
+  modelSelectionHint: '选择一个或多个模型。每次整合尝试（含重试）会按所选顺序轮转；未选择时只记录对话，不执行整合。',
+  modelCatalogLoading: '正在读取可用模型…',
+  modelCatalogFailed: '无法读取可用模型。',
+  modelCatalogPartial: '部分提供方未能返回模型目录。',
+  modelCatalogEmpty: '当前没有可选择的模型。',
+  selectedModels: '用于轮转的模型',
+  unavailableModels: '不可用或未再声明的模型',
+  modelUnavailable: '当前不可用',
+  retry: '重试',
+  checkEveryTurns: '两次整合至少间隔 N 轮',
+  minNewTokens: '最小新增 token 数',
+  cascadeBatchSize: '归档批量',
+  dedupMaxDistance: '关联距离上限',
+  cascadeHint: '每积累这么多同层摘要，就归档为上一层的一条；关联距离上限决定新记忆要多接近既有条目才值得判定关系。',
+  limitsTitle: '单次整合体量',
+  limitsHint: '输入预算决定送入模型的对话长度（超出部分截断保留最近内容）；输出预算需容纳摘要与全部工作单元，过小会导致整合失败。',
+  maxInputTokens: '输入预算（token）',
+  maxOutputTokens: '输出预算（token）',
+  maxWorkUnitsPerRun: '每次最多提取工作单元数',
+  recallPreload: '召回：会话开始时预加载规则与禁忌',
+  advancedHint:
+    '高级字段（二进制、收集器上限、队列调优）可直接在 settings.yaml 的 {ns} 键下编辑。',
+  reset: '重置',
+  discard: '放弃',
+  save: '保存',
+  saving: '保存中…',
+  saveFailed: '保存失败：{message}',
+  readOnly: '只读：当前上下文不可写入设置文档。',
+  unsaved: '未保存',
+} as const satisfies Record<string, string>
+
+/** Key domain of the `hypatia-auto-memory` namespace. */
+export type AutoMemoryLocaleKey = keyof typeof zh
+
+/** English dictionary checked against the Chinese key set. */
+export const en = {
+  loading: 'Loading {ns} settings…',
+  unavailable: '{ns} settings are not available in this context.',
+  title: 'Hypatia Auto Memory',
+  description:
+    'Auto-memory logs conversation turns into Hypatia and runs background consolidation on a dedicated model route.',
+  enable: 'Enable auto-memory',
+  consolidationTitle: 'Consolidation candidate models',
+  modelSelectionHint: 'Choose one or more models. Every consolidation attempt, including a retry, rotates through this order; without a selection, conversations continue logging but consolidation stays idle.',
+  modelCatalogLoading: 'Loading available models…',
+  modelCatalogFailed: 'Unable to load available models.',
+  modelCatalogPartial: 'Some providers did not return a model catalog.',
+  modelCatalogEmpty: 'No models are currently available.',
+  selectedModels: 'Models used for rotation',
+  unavailableModels: 'Unavailable or no longer advertised',
+  modelUnavailable: 'Unavailable',
+  retry: 'Retry',
+  checkEveryTurns: 'Minimum turns between consolidations',
+  minNewTokens: 'Min new tokens',
+  cascadeBatchSize: 'Archive batch',
+  dedupMaxDistance: 'Relation distance',
+  cascadeHint: 'Every batch of same-tier summaries is archived into one entry a tier up. Relation distance is how near a new memory must be to an existing one to be worth judging a relationship.',
+  limitsTitle: 'Per-run consolidation size',
+  limitsHint: 'The input budget caps how much conversation is sent to the model (overflow keeps the most recent content); the output budget must fit the summary plus every work unit — too small and consolidation fails.',
+  maxInputTokens: 'Input budget (tokens)',
+  maxOutputTokens: 'Output budget (tokens)',
+  maxWorkUnitsPerRun: 'Max work units per run',
+  recallPreload: 'Recall: preload rules & taboos at session start',
+  advancedHint:
+    'Advanced fields (binaries, collector caps, queue tuning) can be edited directly in settings.yaml under the {ns} key.',
+  reset: 'Reset',
+  discard: 'Discard',
+  save: 'Save',
+  saving: 'Saving…',
+  saveFailed: 'Save failed: {message}',
+  readOnly: 'Read-only: settings document is not writable in this context.',
+  unsaved: 'Unsaved',
+} satisfies Record<AutoMemoryLocaleKey, string>

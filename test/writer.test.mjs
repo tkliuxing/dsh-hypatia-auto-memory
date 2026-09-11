@@ -1,0 +1,300 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+import { createWriter } from '../src/writer.js'
+
+/** In-memory hypatia CLI stub with scripted behaviors. */
+function makeStub({ existing = new Set(), searchRows = [], similarRows = [], failCreate = false } = {}) {
+  const calls = { get: [], create: [], statements: [], similar: [] }
+  const stub = {
+    calls,
+    async knowledgeGet(name) {
+      calls.get.push(name)
+      return existing.has(name)
+        ? { found: true, name, content: {} }
+        : { found: false }
+    },
+    async knowledgeCreate(name, entry) {
+      calls.create.push({ name, entry })
+      if (failCreate) throw new Error('create failed')
+      existing.add(name)
+    },
+    async statementCreate(head, relation, tail, entry) {
+      calls.statements.push({ head, relation, tail, entry })
+    },
+    async search() {
+      return searchRows
+    },
+    async similar(query, options) {
+      calls.similar.push({ query, options })
+      return similarRows
+    },
+  }
+  return stub
+}
+
+/** A work unit with the fields `writeWorkUnit` requires. */
+function unitFixture(overrides = {}) {
+  return {
+    title: 'Use Arc<Mutex<T>> for shared state',
+    content: '## Context\nshared counter\n## Solution\nArc<Mutex<T>>',
+    tags: ['rust'],
+    project: 'demo',
+    date: '2025-09-09',
+    ...overrides,
+  }
+}
+
+function makeStatus() {
+  const counts = new Map()
+  return { count: (n, by = 1) => counts.set(n, (counts.get(n) ?? 0) + by), warn: () => {}, counts }
+}
+
+test('writeMessage creates missing entries', async () => {
+  const stub = makeStub()
+  const status = makeStatus()
+  const writer = createWriter(stub, { status })
+  const result = await writer.writeMessage({
+    sessionId: 's1', index: 7, markdown: '## Role\nuser', project: 'demo',
+  })
+  assert.equal(result.written, true)
+  assert.equal(stub.calls.create.length, 1)
+  assert.deepEqual(stub.calls.create[0].entry.tags, ['message'])
+  assert.deepEqual(stub.calls.create[0].entry.scopes, ['demo'])
+})
+
+test('writeMessage skips existing entries (idempotent replay)', async () => {
+  const stub = makeStub({ existing: new Set(['msg-s1-7']) })
+  const status = makeStatus()
+  const writer = createWriter(stub, { status })
+  const result = await writer.writeMessage({
+    sessionId: 's1', index: 7, markdown: 'x', project: 'demo',
+  })
+  assert.equal(result.written, false)
+  assert.equal(stub.calls.create.length, 0)
+  assert.equal(status.counts.get('duplicate'), 1)
+})
+
+test('writeSummary links the entries it is given, without probing the seq space', async () => {
+  const stub = makeStub()
+  const status = makeStatus()
+  const writer = createWriter(stub, { status })
+  const result = await writer.writeSummary({
+    sessionId: 's1', fromSeq: 5, toSeq: 9, markdown: 'summary text', project: 'demo',
+    items: ['msg-s1-5', 'msg-s1-7'],
+  })
+  assert.equal(result.written, true)
+  assert.equal(result.links, 2)
+  assert.deepEqual(
+    stub.calls.statements.map((s) => [s.head, s.relation, s.tail]),
+    [['sum-s1-5-9', 'summary', 'msg-s1-5'], ['sum-s1-5-9', 'summary', 'msg-s1-7']],
+  )
+  // The span is [5, 9) but only the two named entries are touched: DSH gives
+  // every streamed token its own seq, so walking the range would mean thousands
+  // of CLI spawns looking up keys that cannot exist.
+  assert.equal(stub.calls.get.filter((n) => n.startsWith('msg-')).length, 0)
+  // The level tag is what `$not-summaried` cascades on. A space inside a tag is
+  // safe: tags travel as one argv element that hypatia splits on commas, with no
+  // shell in between (asserted end-to-end in test/integration).
+  assert.deepEqual(stub.calls.create[0].entry.tags, ['summary', 'summary 1'])
+})
+
+test('writeSummary replay re-asserts edges a crash left unwritten', async () => {
+  // The entry and its edges are separate CLI calls. Returning early on `found`
+  // made a crash between them permanent: the summary existed with no links, and
+  // `$not-summaried` would keep handing the same messages back forever.
+  const stub = makeStub({ existing: new Set(['sum-s1-5-9']) })
+  const status = makeStatus()
+  const writer = createWriter(stub, { status })
+  const replay = await writer.writeSummary({
+    sessionId: 's1', fromSeq: 5, toSeq: 9, markdown: 'summary text', project: 'demo',
+    items: ['msg-s1-5', 'msg-s1-7'],
+  })
+  assert.equal(replay.written, false, 'entry not re-created')
+  assert.equal(stub.calls.create.length, 0)
+  assert.equal(stub.calls.statements.length, 2, 'edges asserted anyway')
+})
+
+test('writeWorkUnit stores with is_a/derivedFrom and no relationship when nothing is near', async () => {
+  const stub = makeStub()
+  const writer = createWriter(stub, { status: makeStatus() })
+  const result = await writer.writeWorkUnit(unitFixture({ derivedFrom: 'sum-s1-5-9' }))
+
+  assert.equal(result.written, true)
+  assert.equal(result.verdict, 'unrelated')
+  const relations = stub.calls.statements.map((s) => s.relation)
+  assert.deepEqual(relations, ['is_a', 'derivedFrom'])
+})
+
+test('writeWorkUnit names entries by content, not by date', async () => {
+  // `wu-<date>-<slug>` failed both ways: same-day slug collisions silently
+  // dropped the second unit, and the same lesson re-extracted on a later day
+  // produced a duplicate. A content digest fixes both.
+  const stub = makeStub()
+  const writer = createWriter(stub, { status: makeStatus() })
+  const monday = await writer.writeWorkUnit(unitFixture({ date: '2025-09-08' }))
+  const tuesday = await writer.writeWorkUnit(unitFixture({ date: '2025-09-09' }))
+  assert.equal(monday.name, tuesday.name, 'same content, same name on any day')
+  assert.match(monday.name, /^wu-use-arc-mutex-t-for-shared-state-[0-9a-f]{8}$/)
+
+  const other = await writer.writeWorkUnit(unitFixture({ content: 'completely different lesson' }))
+  assert.notEqual(other.name, monday.name, 'different content, different name')
+})
+
+test('writeWorkUnit ignores operational rows when looking for relatives', async () => {
+  // `msg-*` entries outnumber knowledge by orders of magnitude, so an unfiltered
+  // nearest-neighbour lookup almost always returned a raw chat log.
+  const stub = makeStub({
+    similarRows: [
+      { name: 'msg-s1-42', content: { tags: ['message'] }, distance: 0.01 },
+      { name: 'sum-s1-0-9', content: { tags: ['summary', 'summary 1'] }, distance: 0.02 },
+      { name: 'session-s1', content: { tags: ['session'] }, distance: 0.03 },
+      { name: 'hypatia-dream-run-20250101', content: { tags: ['system', 'hypatia-dream-run'] }, distance: 0.04 },
+      { name: 'wu-real-memory-aabbccdd', content: { tags: ['memory', 'work-unit'] }, distance: 0.2 },
+    ],
+  })
+  const seen = []
+  const writer = createWriter(stub, {
+    status: makeStatus(),
+    adjudicate: async (_unit, candidates) => {
+      seen.push(candidates.map((row) => row.name))
+      return { verdict: 'extends', target: 'wu-real-memory-aabbccdd' }
+    },
+  })
+  const result = await writer.writeWorkUnit(unitFixture())
+
+  assert.deepEqual(seen, [['wu-real-memory-aabbccdd']])
+  assert.equal(result.verdict, 'extends')
+  assert.deepEqual(
+    stub.calls.statements.map((s) => [s.relation, s.tail]),
+    [['is_a', 'work-unit'], ['extends', 'wu-real-memory-aabbccdd']],
+  )
+})
+
+test('writeWorkUnit drops candidates beyond the distance floor', async () => {
+  const stub = makeStub({
+    similarRows: [{ name: 'wu-far-away-11223344', content: { tags: ['memory'] }, distance: 0.9 }],
+  })
+  let asked = false
+  const writer = createWriter(stub, {
+    status: makeStatus(),
+    adjudicate: async () => { asked = true; return { verdict: 'extends' } },
+  })
+  const result = await writer.writeWorkUnit(unitFixture())
+  assert.equal(asked, false, 'nothing near enough to be worth a model call')
+  assert.equal(result.verdict, 'unrelated')
+})
+
+test('a contradiction keeps both entries and records supersedes', async () => {
+  // docs/memory-nolinear.md: a correction must leave a trace rather than
+  // quietly overwriting what the system used to believe.
+  const stub = makeStub({
+    similarRows: [{ name: 'wu-old-belief-deadbeef', content: { tags: ['memory'] }, distance: 0.1 }],
+  })
+  const writer = createWriter(stub, {
+    status: makeStatus(),
+    adjudicate: async () => ({ verdict: 'contradicts', target: 'wu-old-belief-deadbeef' }),
+  })
+  const result = await writer.writeWorkUnit(unitFixture())
+
+  assert.equal(result.written, true, 'the new belief is stored')
+  assert.equal(result.verdict, 'contradicts')
+  assert.deepEqual(
+    stub.calls.statements.map((s) => [s.relation, s.tail]),
+    [['is_a', 'work-unit'], ['supersedes', 'wu-old-belief-deadbeef']],
+  )
+})
+
+test('a duplicate verdict stores nothing at all', async () => {
+  const stub = makeStub({
+    similarRows: [{ name: 'wu-same-thing-cafebabe', content: { tags: ['memory'] }, distance: 0.02 }],
+  })
+  const writer = createWriter(stub, {
+    status: makeStatus(),
+    adjudicate: async () => ({ verdict: 'duplicate', target: 'wu-same-thing-cafebabe' }),
+  })
+  const result = await writer.writeWorkUnit(unitFixture())
+  assert.equal(result.written, false)
+  assert.equal(stub.calls.create.length, 0)
+  assert.equal(stub.calls.statements.length, 0)
+})
+
+test('writeWorkUnit still stores when similarity search is unavailable', async () => {
+  // A shelf with no embedding model fails every `similar` call. That must cost
+  // the relationship edge, never the memory.
+  const stub = makeStub()
+  stub.similar = async () => { throw new Error('model unavailable: no embedding provider configured') }
+  const writer = createWriter(stub, {
+    status: makeStatus(),
+    adjudicate: async () => ({ verdict: 'extends', target: 'x' }),
+  })
+  const result = await writer.writeWorkUnit(unitFixture())
+  assert.equal(result.written, true)
+  assert.equal(result.verdict, 'unrelated')
+})
+
+test('an adjudication failure degrades to storing without a relationship', async () => {
+  const stub = makeStub({
+    similarRows: [{ name: 'wu-nearby-0badf00d', content: { tags: ['memory'] }, distance: 0.1 }],
+  })
+  const writer = createWriter(stub, {
+    status: makeStatus(),
+    adjudicate: async () => { throw new Error('route down') },
+  })
+  const result = await writer.writeWorkUnit(unitFixture())
+  assert.equal(result.written, true)
+  assert.equal(result.verdict, 'unrelated')
+  assert.deepEqual(stub.calls.statements.map((s) => s.relation), ['is_a'])
+})
+
+test('writeSessionNode creates the node and links the message range it is given', async () => {
+  const stub = makeStub()
+  const writer = createWriter(stub, { status: makeStatus() })
+  const result = await writer.writeSessionNode({
+    sessionId: 's1', markdown: 'Storage rewrite session', project: 'demo',
+    linkFrom: 0, linkTo: 3,
+  })
+
+  assert.equal(result.written, true)
+  assert.equal(result.links, 3)
+  assert.deepEqual(stub.calls.create[0].entry.tags, ['session'])
+  // Direction is message -> session, the protocol's `belongTo` orientation.
+  assert.deepEqual(
+    stub.calls.statements.map((s) => [s.head, s.relation, s.tail]),
+    [
+      ['msg-s1-0', 'belongTo', 'session-s1'],
+      ['msg-s1-1', 'belongTo', 'session-s1'],
+      ['msg-s1-2', 'belongTo', 'session-s1'],
+    ],
+  )
+})
+
+test('writeSessionNode links only the range still owed, never re-linking', async () => {
+  const stub = makeStub({ existing: new Set(['session-s1']) })
+  const writer = createWriter(stub, { status: makeStatus() })
+  const result = await writer.writeSessionNode({
+    sessionId: 's1', markdown: 'ignored, the entry already exists', project: 'demo',
+    linkFrom: 3, linkTo: 5,
+  })
+
+  // hypatia has no `knowledge-update`, so a later title cannot replace the
+  // first — the original stands and only the owed edges are added.
+  assert.equal(result.written, false)
+  assert.equal(stub.calls.create.length, 0)
+  assert.deepEqual(stub.calls.statements.map((s) => s.head), ['msg-s1-3', 'msg-s1-4'])
+})
+
+test('writeSessionNode refuses to fabricate a node from empty text', async () => {
+  // The log path calls in with no text, purely to settle owed `belongTo` edges.
+  // If the node has been deleted since, recreating it empty would invent the
+  // session summary the protocol says never to invent.
+  const stub = makeStub()
+  const writer = createWriter(stub, { status: makeStatus() })
+  const result = await writer.writeSessionNode({
+    sessionId: 's1', markdown: '   ', project: 'demo', linkFrom: 0, linkTo: 3,
+  })
+  assert.equal(result.written, false)
+  assert.equal(result.links, 0)
+  assert.equal(stub.calls.create.length, 0)
+  assert.equal(stub.calls.statements.length, 0, 'no edges to an absent node')
+})
