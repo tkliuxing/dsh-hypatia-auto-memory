@@ -9,10 +9,15 @@ route**, with zero model work in the main session.
 Writing is automatic; **reading is the agent's job**, through the bundled
 `hypatia-memory` skill. That split is deliberate — see *Recall* below.
 
-Unlike `dsh-hypatia` (skills + auto-approval for bash-string hypatia calls),
-this plugin drives the hypatia-memory protocol from **DSH native events** and
-calls the `hypatia` CLI through the subprocess service with argv arrays — no
-shell, no sandbox escalation, no approval prompts.
+**This plugin replaces `dsh-hypatia`.** That plugin left the writing to the
+agent, which in practice did not happen: in the deployment this one was written
+for, the model loaded the protocol and still issued a `hypatia` command in one
+recorded session out of fifteen — the one where it was asked to directly. Here
+the protocol is driven from **DSH native events**, and the `hypatia` CLI is
+called through the subprocess service with argv arrays — no shell, no sandbox
+escalation, no approval prompt. What is still worth having from `dsh-hypatia`
+ships here: auto-approval for the agent's own bash `hypatia` calls, and its
+`hypatia` / `hypatia-dream` skills. Install one or the other, not both.
 
 ## Install
 
@@ -33,10 +38,17 @@ package. If you edit `src/client/*`, run `npm install && npm run build` in this
 directory to regenerate it; while `pnpm run dev:web` is active in the DSH
 checkout, client-plugin changes reload without a full page refresh.
 
-**Coexistence with `dsh-hypatia`:** both can be installed — auto-approve and
-auto-memory are independent. For the `hypatia-memory` skill, keep only one
-provider: set `skills: false` on `dsh-hypatia` (this plugin's DSH-specific
-variant assumes the auto layer is running and warns otherwise).
+**Replacing `dsh-hypatia`:** remove it from the profile and restart.
+
+```bash
+dsh plugin --profile web remove dsh-hypatia
+```
+
+Both register the same skill names and the registry keeps whichever plugin got
+there first. This one refuses to shadow another provider (it warns instead), so
+leaving `dsh-hypatia` installed hands the agent exactly the agent-driven
+protocol whose failure this plugin exists to fix. If it has to stay for some
+other reason, `skills: false` on its bundle row is the minimum.
 
 ## How it works
 
@@ -119,6 +131,19 @@ agent/session-start ──▶ rules/taboos inject()
   can call tools; the previous per-turn injector also vetoed DSH's own runtime
   context section by returning from `agent/pre-step` without calling `next()`.
 
+- **Auto-approve** answers the approval request for the agent's own bash
+  `hypatia` calls, and only those: the executable word must be a trusted
+  basename (after `KEY=value` prefixes) and the command must carry no pipe,
+  redirect, chain or command substitution *outside quotes* — a JSE argument full
+  of `|` and `>` inside quotes still qualifies. Everything else goes to the
+  human. The plugin's own writes never take this path.
+
+- **Skills** are bundled: `hypatia-memory` in this plugin's variant (the
+  automatic layer writes, the agent retrieves), plus byte-identical copies of
+  the repository's `hypatia` CLI reference and `hypatia-dream`, carried because
+  removing `dsh-hypatia` would otherwise take them with it. A skill already
+  registered by another provider is left alone and reported.
+
 ## Configuration
 
 Settings namespace `hypatia-auto-memory` (edit `settings.yaml` or Web
@@ -128,6 +153,7 @@ settings; all fields optional, defaults shown):
 hypatia-auto-memory:
   enabled: true
   binaries: [hypatia]
+  autoApprove: true              # approve the AGENT's plain `hypatia …` bash calls
   collector:
     enabled: true
     maxAssistantChars: 8000      # per-message cap before truncation marker
@@ -169,9 +195,12 @@ The cordis config block on the bundle row only carries skill packaging:
 ```yaml
 - id: hypatia-auto-memory
   config:
-    skills: true                 # register the bundled hypatia-memory skill
+    skills: true                 # register hypatia-memory + hypatia + hypatia-dream
     skillsDir: /abs/path         # override the packaged skills/ directory
 ```
+
+`enabled` and `autoApprove` are read when the plugin starts, so changing either
+needs a profile reload; every other switch applies immediately.
 
 ## Operations checklist
 
@@ -200,6 +229,8 @@ The cordis config block on the bundle row only carries skill packaging:
 | Task in `failed` state | A CLI or model error persisted after `maxAttempts`. Failed `log-message` records are pruned at the next startup, since the watermark re-derives their range; other kinds are kept for inspection — delete one to let the next trigger re-create it |
 | Watermark says logged, but the shelf has no entries | The shelf was reset or switched after logging. Handled at startup: `housekeeping.reconcileOnStartup` resets any row whose session has no `msg-*` left, and that session is re-logged — and re-consolidated — from the start on its next activity. A shelf query that fails leaves the row untouched. A session whose messages were all deleted on purpose is indistinguishable and is logged again; turn the switch off if that matters |
 | Duplicate `msg-*` after weird manual edits | Delete the entry in hypatia and lower `lastLoggedSeq` for that session in the state domain — backfill recreates it once |
+| The agent's own `hypatia` call still asks for approval | `autoApprove: false` (needs a profile reload to change), the command pipes/redirects/chains outside quotes, or its first word is not one of `binaries` — only plain calls are answered, by design |
+| The agent got a memory protocol that tells it to log messages by hand | `dsh-hypatia` is still installed and registered the skill names first; remove it from the profile — this plugin logs a warning naming the other provider at startup |
 | Project scope looks wrong | Scope = git-root basename of the session cwd (falls back to basename); two same-named checkouts share a scope by design |
 
 ## Known limitations
@@ -237,6 +268,11 @@ Deliberate, and worth knowing before you rely on them:
   linked leave the tier's unarchived set, so the retry archives a different
   batch. Everything is still archived exactly once; the grouping is just not the
   one the first attempt intended.
+- **Two of the three bundled skills are copies.** `hypatia` and `hypatia-dream`
+  are byte-identical copies of the repository's `skills/`, because a published
+  package cannot reach outside itself. `npm run sync-skills` refreshes them, and
+  `test/skills.test.mjs` fails when they drift — but only in a repository
+  checkout, where the originals are there to compare against.
 - **`enabled: false` at the top level is read at plugin startup**; toggling it
   live requires a profile reload, while the per-feature switches apply
   immediately.
@@ -262,6 +298,8 @@ dsh-hypatia-auto-memory/
 │   ├── consolidator.js   # thresholds, prompt, llm.stream, validation
 │   ├── cascade.js        # log₁₆(n) hierarchical summary archive
 │   ├── recall.js         # rules/taboos preload at session start
+│   ├── auto-approve.js   # approves the agent's own plain bash hypatia calls
+│   ├── skills.js         # bundled skill registration (never shadows another provider)
 │   ├── status.js         # counters + structured logging
 │   └── client/           # browser settings card
 │       ├── index.tsx     # client plugin entry + slot registration
@@ -269,8 +307,13 @@ dsh-hypatia-auto-memory/
 │       └── slot-contract.ts
 ├── lib/
 │   └── client.js         # built browser factory (commit this)
-├── skills/hypatia-memory/SKILL.md   # DSH-specific skill (retrieval is the agent's)
-├── scripts/it-shelf.sh   # throwaway shelf for manual CLI probing
+├── skills/
+│   ├── hypatia-memory/   # this plugin's variant (retrieval is the agent's)
+│   ├── hypatia/          # copy of ../skills/hypatia
+│   └── hypatia-dream/    # copy of ../skills/hypatia-dream
+├── scripts/
+│   ├── sync-skills.mjs   # refresh both copies from the repository root
+│   └── it-shelf.sh       # throwaway shelf for manual CLI probing
 ├── test/                 # node:test units (npm test)
 │   └── integration/      # contracts against a real hypatia (npm run test:integration)
 └── README.md

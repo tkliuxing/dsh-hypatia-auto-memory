@@ -18,6 +18,10 @@ export const SETTINGS_NAMESPACE = 'hypatia-auto-memory'
 export const DEFAULTS = {
   enabled: true,
   binaries: ['hypatia'],
+  // Approve the AGENT's own `hypatia …` bash calls (retrieval, explicit
+  // remember/forget). This plugin's own writes never need it — they are argv
+  // arrays on the subprocess service. Read at startup, like `enabled`.
+  autoApprove: true,
   collector: {
     enabled: true,
     maxAssistantChars: 8000,
@@ -84,6 +88,7 @@ const ConsolidationModelSchema = z.object({
 export const SettingsSchema = z.object({
   enabled: z.boolean().default(DEFAULTS.enabled),
   binaries: z.array(z.string()).default(DEFAULTS.binaries),
+  autoApprove: z.boolean().default(DEFAULTS.autoApprove),
   collector: z.object({
     enabled: z.boolean().default(DEFAULTS.collector.enabled),
     maxAssistantChars: z.number().step(1).min(500).default(DEFAULTS.collector.maxAssistantChars),

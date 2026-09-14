@@ -2,20 +2,26 @@
  * dsh-hypatia-auto-memory — event-driven Hypatia memory for DSH.
  *
  * One host plugin whose collect fiber owns the durable core (state domain,
- * queue, CLI, writer, collector); three optional child fibers attach the
- * model-dependent capabilities so a deployment missing `llm` still logs
- * conversations, and a deployment missing `skills` still remembers:
+ * queue, CLI, writer, collector); optional child fibers attach the rest, so a
+ * deployment missing `llm` still logs conversations and a deployment missing
+ * `skills` still remembers:
  *
  *   collect  (inject sessions, storageDomain, subprocess, settings)
  *     ├─ consolidate (inject llm, sessions)   — span summaries, cascade, work units
  *     ├─ recall      (inject agents)          — rules/taboos preload at session start
  *     ├─ housekeeping (inject sessionPersistence) — prune progress of vanished sessions
- *     └─ skills      (inject skills)          — DSH-specific hypatia-memory skill
+ *     ├─ auto-approve (inject approval, tools) — the agent's own bash `hypatia` calls
+ *     └─ skills      (inject skills)          — hypatia-memory, hypatia, hypatia-dream
+ *
+ * The last two fibers are here because this plugin REPLACES `dsh-hypatia`:
+ * writing memory by asking the model to do it did not happen in practice, and
+ * the parts of that plugin still worth having — approving the agent's hypatia
+ * calls and shipping the CLI skills — only serve the retrieval half of this
+ * one. Installing both is a misconfiguration; see README.
  *
  * @module dsh-hypatia-auto-memory
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -31,67 +37,14 @@ import { countLoggableMessages, createCollector, formatSpan } from './collector.
 import { createCascade } from './cascade.js'
 import { createConsolidator, PLUGIN_NAME } from './consolidator.js'
 import { createRecall } from './recall.js'
+import { createAutoApprove } from './auto-approve.js'
+import { registerSkills } from './skills.js'
 import { pruneVanishedSessions, reconcileProgress } from './housekeeping.js'
 
 export const name = 'dsh-hypatia-auto-memory'
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const DEFAULT_SKILLS_DIR = join(PACKAGE_ROOT, 'skills')
-
-/* -------------------------------------------------------------------------- */
-/* Skill packaging                                                            */
-/* -------------------------------------------------------------------------- */
-
-/** Minimal YAML-frontmatter reader (same contract as dsh-hypatia). */
-function parseFrontmatter(source) {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(source)
-  if (match === null) return { attributes: {}, body: source }
-  const attributes = {}
-  for (const line of match[1].split('\n')) {
-    const pair = /^([A-Za-z-]+):\s*(.*)$/.exec(line)
-    if (pair !== null) attributes[pair[1]] = pair[2].trim()
-  }
-  return { attributes, body: source.slice(match[0].length) }
-}
-
-/** Register the packaged hypatia-memory skill, refusing to shadow another provider's. */
-function registerSkills(ctx, skillsDir, status) {
-  let entries
-  try {
-    entries = readdirSync(skillsDir, { withFileTypes: true })
-  } catch {
-    status.warn(`skills dir unreadable: ${skillsDir}`)
-    return
-  }
-  for (const entry of entries) {
-    if (entry.isDirectory() === false) continue
-    const skillFile = join(skillsDir, entry.name, 'SKILL.md')
-    if (existsSync(skillFile) === false) continue
-    const { attributes, body } = parseFrontmatter(readFileSync(skillFile, 'utf8'))
-    const skillName = attributes.name ?? entry.name
-    void (async () => {
-      const existing = await ctx.skills.get(skillName).catch(() => undefined)
-      if (existing !== undefined && existing.provider !== PLUGIN_NAME) {
-        status.warn(
-          `skill "${skillName}" already provided by ${existing.provider}; `
-          + 'set skills: false on that plugin (e.g. dsh-hypatia) to use the auto-memory variant',
-        )
-        return
-      }
-      ctx.skills.register({
-        name: skillName,
-        description: attributes.description ?? '',
-        content: body,
-        path: skillFile,
-        source: 'bundled',
-        provider: PLUGIN_NAME,
-        resourceBase: dirname(skillFile),
-        invocation: { modelInvocable: true, userInvocable: attributes['user-invocable'] !== 'false' },
-      })
-      status.info(`registered bundled skill: ${skillName}`)
-    })()
-  }
-}
 
 /* -------------------------------------------------------------------------- */
 /* Composition                                                                */
@@ -340,12 +293,27 @@ function applyCollect(ctx, cordisConfig) {
       },
     })
 
+    // Auto-approve is for the agent's OWN bash `hypatia` calls — retrieval,
+    // explicit remember/forget. This plugin's writes never pass through it:
+    // they are argv arrays on the subprocess service, with no shell and no
+    // approval in the path.
+    if (configHandle.get().autoApprove !== false) {
+      ctx.plugin({
+        name: `${name}/auto-approve`,
+        inject: ['approval', 'tools'],
+        apply: (c) => {
+          createAutoApprove(c, { getBinaries: () => configHandle.get().binaries, status })
+        },
+      })
+    }
+
     if (cordisConfig.skills !== false) {
       ctx.plugin({
         name: `${name}/skills`,
         inject: ['skills'],
         apply: (c) => {
-          registerSkills(c, cordisConfig.skillsDir ?? DEFAULT_SKILLS_DIR, status)
+          void registerSkills(c, cordisConfig.skillsDir ?? DEFAULT_SKILLS_DIR, status, PLUGIN_NAME)
+            .catch((error) => status.warn(`skill registration failed: ${String(error)}`))
         },
       })
     }

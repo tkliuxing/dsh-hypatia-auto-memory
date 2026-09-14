@@ -35,6 +35,7 @@ const DEFAULT_CONSOLIDATION = {
 
 export interface ConfigShape {
   enabled?: boolean
+  autoApprove?: boolean
   consolidation?: typeof DEFAULT_CONSOLIDATION
   recall?: { preloadRulesTaboos?: boolean }
 }
@@ -77,6 +78,7 @@ export function SettingsCard({ scope, loadModelCatalog, t }: SettingsCardProps) 
 
   const resolved: ConfigShape = useMemo(() => (value ?? base ?? {
     enabled: true,
+    autoApprove: true,
     consolidation: DEFAULT_CONSOLIDATION,
     recall: { preloadRulesTaboos: true },
   }), [value, base])
@@ -167,6 +169,9 @@ export function SettingsCard({ scope, loadModelCatalog, t }: SettingsCardProps) 
       const tasks: Promise<void>[] = []
       if (!same(draft.enabled, resolved.enabled)) {
         tasks.push(scope.set('enabled', draft.enabled))
+      }
+      if (!same(draft.autoApprove, resolved.autoApprove)) {
+        tasks.push(scope.set('autoApprove', draft.autoApprove))
       }
       if (!same(draft.consolidation, resolved.consolidation)) {
         tasks.push(scope.set('consolidation', draft.consolidation))
@@ -275,6 +280,35 @@ export function SettingsCard({ scope, loadModelCatalog, t }: SettingsCardProps) 
             >
               <span className={css.switchThumb} />
             </button>
+          </div>
+
+          <div className={css.field}>
+            <div className={css.fieldHead}>
+              <label className={css.label} htmlFor="ham-autoApprove">{t('autoApprove')}</label>
+              {(draft.autoApprove ?? true) !== (base.autoApprove ?? true) ? (
+                <button
+                  type="button"
+                  className={css.reset}
+                  disabled={disabled}
+                  onClick={() => setDraft((current) => ({ ...current, autoApprove: base.autoApprove ?? true }))}
+                >
+                  {t('reset')}
+                </button>
+              ) : null}
+            </div>
+            <button
+              id="ham-autoApprove"
+              type="button"
+              role="switch"
+              aria-checked={draft.autoApprove ?? true}
+              aria-label={t('autoApprove')}
+              className={`${css.switch} ${draft.autoApprove ?? true ? css.switchOn : ''}`}
+              disabled={disabled}
+              onClick={() => setDraft((current) => ({ ...current, autoApprove: !(current.autoApprove ?? true) }))}
+            >
+              <span className={css.switchThumb} />
+            </button>
+            <p className={css.hint}>{t('autoApproveHint')}</p>
           </div>
 
           <section className={css.group} aria-labelledby="ham-consolidation-title">

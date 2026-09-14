@@ -11,6 +11,8 @@ export const zh = {
   description:
     '自动将对话轮次记录到 Hypatia，并在新内容足够多时通过独立模型路由进行后台整合。',
   enable: '启用自动记忆',
+  autoApprove: '自动批准模型发起的 hypatia 命令',
+  autoApproveHint: '仅限不含管道、重定向、命令串联的纯 hypatia 调用；插件自身的写入不经过此路径。关闭后模型每次检索都会弹出批准框。修改后需重载配置档生效。',
   consolidationTitle: '整合候选模型',
   modelSelectionHint: '选择一个或多个模型。每次整合尝试（含重试）会按所选顺序轮转；未选择时只记录对话，不执行整合。',
   modelCatalogLoading: '正在读取可用模型…',
@@ -54,6 +56,8 @@ export const en = {
   description:
     'Auto-memory logs conversation turns into Hypatia and runs background consolidation on a dedicated model route.',
   enable: 'Enable auto-memory',
+  autoApprove: "Auto-approve the agent's own hypatia commands",
+  autoApproveHint: 'Only plain hypatia calls with no pipe, redirect or chaining; this plugin\'s own writes never take that path. With it off, every retrieval raises an approval prompt. Takes effect after a profile reload.',
   consolidationTitle: 'Consolidation candidate models',
   modelSelectionHint: 'Choose one or more models. Every consolidation attempt, including a retry, rotates through this order; without a selection, conversations continue logging but consolidation stays idle.',
   modelCatalogLoading: 'Loading available models…',

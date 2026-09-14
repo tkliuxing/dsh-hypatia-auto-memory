@@ -9,8 +9,12 @@
 #
 #   - id: hypatia-auto-memory
 #     config:
-#       skills: true             # register the DSH-specific hypatia-memory skill
+#       skills: true             # register hypatia-memory + hypatia + hypatia-dream
 #       skillsDir: /abs/path     # override the packaged skills/ directory
+#
+# This plugin replaces dsh-hypatia: it carries that plugin's skills and its
+# auto-approval for the agent's own bash `hypatia` calls. Remove dsh-hypatia
+# from the profile rather than running both.
 - insert:
     - id: hypatia-auto-memory
       name: dsh-hypatia-auto-memory
