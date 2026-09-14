@@ -171,6 +171,44 @@ test('writeWorkUnit ignores operational rows when looking for relatives', async 
   )
 })
 
+test('the candidate fetch oversamples, since the exclusion cannot be pushed into the query', async () => {
+  // `hypatia similar` takes only target/limit/shelf — no tag or scope filter —
+  // and the operational layer both outnumbers knowledge and scores NEARER: a
+  // raw `msg-*` holds the very words the unit was extracted from. Measured on a
+  // live shelf: 7 of the nearest 10 rows were operational. Asking for exactly
+  // the number wanted therefore left one candidate, often none, and every write
+  // silently degraded to "no relationship".
+  const operational = Array.from({ length: 7 }, (_, index) => ({
+    name: `msg-s1-${index}`,
+    content: { tags: ['message'] },
+    distance: 0.01 * (index + 1),
+  }))
+  const stub = makeStub({
+    similarRows: [...operational, { name: 'wu-real-memory-aabbccdd', content: { tags: ['memory', 'work-unit'] }, distance: 0.2 }],
+  })
+  const seen = []
+  const writer = createWriter(stub, {
+    status: makeStatus(),
+    adjudicate: async (_unit, candidates) => {
+      seen.push(candidates.map((row) => row.name))
+      return { verdict: 'extends', target: 'wu-real-memory-aabbccdd' }
+    },
+  })
+  await writer.writeWorkUnit(unitFixture())
+
+  assert.equal(stub.calls.similar[0].options.limit, 20, 'five wanted, twenty fetched')
+  assert.deepEqual(seen, [['wu-real-memory-aabbccdd']], 'the real relative survived seven nearer log rows')
+})
+
+test('the oversampled fetch has a ceiling', async () => {
+  // Rows travel back through the CLI in full, so the multiplier cannot run away.
+  const stub = makeStub()
+  const writer = createWriter(stub, { status: makeStatus(), adjudicate: async () => undefined })
+  await writer.writeWorkUnit(unitFixture({ candidateLimit: 20 }))
+
+  assert.equal(stub.calls.similar[0].options.limit, 40)
+})
+
 test('writeWorkUnit drops candidates beyond the distance floor', async () => {
   const stub = makeStub({
     similarRows: [{ name: 'wu-far-away-11223344', content: { tags: ['memory'] }, distance: 0.9 }],

@@ -28,6 +28,18 @@ import { sanitizeSlug } from './content-policy.js'
 const OPERATIONAL_PREFIXES = ['msg-', 'sum', 'session-', 'hypatia-dream-run-']
 const OPERATIONAL_TAGS = new Set(['message', 'session', 'hypatia-dream-run'])
 
+/**
+ * How many rows to ask `similar` for per candidate actually wanted.
+ *
+ * The operational layer cannot be excluded in the query (see `findCandidates`),
+ * outnumbers knowledge on an active shelf, and ranks nearer, so the fetch has
+ * to absorb it. Four covers the measured 7-in-10 ratio with room to spare.
+ */
+const CANDIDATE_OVERSAMPLE = 4
+
+/** Upper bound on one oversampled fetch — rows travel back through the CLI. */
+const CANDIDATE_FETCH_CEILING = 40
+
 /** Name of a hypatia row: `similar`/query rows carry `name`, `search` rows `key`. */
 function rowName(row) {
   return typeof row?.name === 'string' ? row.name
@@ -208,9 +220,18 @@ export function createWriter(cli, { status, adjudicate }) {
    */
   async function findCandidates(unit, name, { maxDistance, limit }) {
     try {
+      // OVERSAMPLED, because the exclusion below cannot be pushed into the
+      // query: `hypatia similar` takes only target/limit/shelf, no tag or scope
+      // filter. The operational layer is the majority of an active shelf (101
+      // of 183 knowledge entries on the profile this was measured on) and it
+      // scores CLOSER than real knowledge — a raw `msg-*` holds the very words
+      // of the conversation the unit was extracted from. Measured: 7 of the
+      // nearest 10 rows were operational, so asking for 5 and filtering
+      // afterwards left one candidate, often none, and adjudication silently
+      // degraded to "no relationship" on every write.
       const rows = await cli.similar(`${unit.title}\n${unit.content}`.slice(0, 500), {
         target: 'knowledge',
-        limit,
+        limit: Math.min(limit * CANDIDATE_OVERSAMPLE, CANDIDATE_FETCH_CEILING),
       })
       return rows
         .filter((row) => rowName(row) !== name)
