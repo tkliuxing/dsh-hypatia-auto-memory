@@ -186,7 +186,11 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
     }
     if ((await acquire()) === false) return
     try {
-      await tasks.update(id, (t) => ({ ...t, status: 'running' }))
+      // The previous attempt's error clears WITH the status. A task that
+      // deferred and was later resumed otherwise runs — and succeeds — while
+      // still carrying `session … is not loaded`, which reads like a live
+      // failure to anyone inspecting the table mid-run.
+      await tasks.update(id, (t) => ({ ...t, status: 'running', error: null }))
       try {
         const snapshot = tasks.get(id)
         await executor(snapshot)

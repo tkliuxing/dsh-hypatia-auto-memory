@@ -342,6 +342,35 @@ test('a task whose session is not loaded is deferred, not failed', async () => {
   assert.equal(table.get('log-message:a'), undefined)
 })
 
+test('a resumed task no longer carries the error that deferred it', async () => {
+  // Starting an attempt flipped the status to `running` but left `error` alone,
+  // so a task that was executing — and about to succeed — still read as
+  // `session a is not loaded` to anyone inspecting the table mid-run. Seen live:
+  // a backfilled consolidation sat at `running` with a stale deferral message.
+  const table = makeTable()
+  let available = false
+  const errorAtStart = []
+  const queue = createQueue({
+    tasks: table,
+    getConfig: () => CONFIG,
+    executors: {
+      'log-message': async () => {
+        errorAtStart.push(table.get('log-message:a')?.error ?? null)
+        if (!available) throw new TaskDeferredError('session a is not loaded')
+      },
+    },
+    status: makeStatus(),
+  })
+  await queue.enqueue({ kind: 'log-message', sessionId: 'a', fromSeq: 0, toSeq: 3, project: 'p' })
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  assert.match(table.get('log-message:a').error, /not loaded/, 'the deferral itself is still recorded')
+
+  available = true
+  queue.resumeSession('a')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.deepEqual(errorAtStart, [null, null], 'every attempt starts with a clean error field')
+})
+
 test('registering an executor leaves deferred tasks for their session', async () => {
   const table = makeTable({
     'consolidate:a': { kind: 'consolidate', sessionId: 'a', fromSeq: 0, toSeq: 5, project: 'p', status: 'deferred', attempts: 0, enqueuedAt: 0 },
