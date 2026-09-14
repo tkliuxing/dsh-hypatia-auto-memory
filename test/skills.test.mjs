@@ -52,6 +52,10 @@ test('a packaged skill registers under its frontmatter name', async () => {
   assert.equal(skill.name, 'real-name')
   assert.equal(skill.description, 'what it does')
   assert.equal(skill.provider, 'ham')
+  // DSH validates this as a tagged union when the agent LOADS the skill, so a
+  // bare path string registers fine and then fails every read with
+  // `"value.resourceBase" must match exactly one oneOf branch (matched 0)`.
+  assert.deepEqual(skill.resourceBase, { kind: 'directory', path: dirname(skill.path) })
   assert.equal(skill.invocation.userInvocable, false, 'user-invocable: false is honoured')
   assert.equal(skill.content.startsWith('# body'), true)
 })

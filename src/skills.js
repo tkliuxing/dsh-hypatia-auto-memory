@@ -85,7 +85,14 @@ export async function registerSkills(ctx, skillsDir, status, provider) {
       path: skillFile,
       source: 'bundled',
       provider,
-      resourceBase: dirname(skillFile),
+      // A TAGGED UNION, not a path: DSH validates the loaded skill against
+      // `{kind:'directory',path} | {kind:'url',url} | {kind:'opaque'}` and a
+      // bare string fails that check at LOAD time, not registration — the
+      // skill appears in the registry and every attempt to read it comes back
+      // as `"value.resourceBase" must match exactly one oneOf branch
+      // (matched 0)` — what the agent hit on its first two calls once this
+      // plugin took over the skill names from dsh-hypatia.
+      resourceBase: { kind: 'directory', path: dirname(skillFile) },
       invocation: { modelInvocable: true, userInvocable: attributes['user-invocable'] !== 'false' },
     })
     registered.push(skillName)
