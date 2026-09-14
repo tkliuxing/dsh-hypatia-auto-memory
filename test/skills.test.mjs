@@ -80,6 +80,27 @@ test('a re-register by this same plugin is allowed', async () => {
   assert.deepEqual(await registerSkills({ skills }, dir, quiet(), 'ham'), ['hypatia-memory'])
 })
 
+test('one rejected skill does not cost the others their registration', async () => {
+  // Read, parse and register used to run unguarded in one loop, so a single bad
+  // SKILL.md threw out of it and every skill after — a set decided by readdir
+  // order — was silently never registered.
+  const dir = skillDir('good', 'name: good\ndescription: d')
+  mkdirSync(join(dir, 'broken'), { recursive: true })
+  writeFileSync(join(dir, 'broken', 'SKILL.md'), '---\nname: broken\ndescription: d\n---\nbody\n')
+  const skills = fakeSkills()
+  const registry = {
+    get: skills.get,
+    register: (skill) => {
+      if (skill.name === 'broken') throw new Error('registry rejected it')
+      skills.register(skill)
+    },
+  }
+  const status = quiet()
+
+  assert.deepEqual(await registerSkills({ skills: registry }, dir, status, 'ham'), ['good'])
+  assert.match(status.lines.join('\n'), /"broken" not registered: .*registry rejected it/)
+})
+
 test('an unreadable skills directory warns instead of throwing', async () => {
   const status = quiet()
   assert.deepEqual(await registerSkills({ skills: fakeSkills() }, '/nope/not/here', status, 'ham'), [])

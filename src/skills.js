@@ -66,36 +66,44 @@ export async function registerSkills(ctx, skillsDir, status, provider) {
     if (entry.isDirectory() === false) continue
     const skillFile = join(skillsDir, entry.name, 'SKILL.md')
     if (existsSync(skillFile) === false) continue
-    const { attributes, body } = parseFrontmatter(readFileSync(skillFile, 'utf8'))
-    const skillName = attributes.name ?? entry.name
-    const existing = await ctx.skills.get(skillName).catch(() => undefined)
-    if (existing !== undefined && existing.provider !== provider) {
-      status.warn(
-        `skill "${skillName}" is already provided by ${existing.provider}; `
-        + 'this plugin replaces dsh-hypatia — remove it from the profile '
-        + '(`dsh plugin --profile <name> remove dsh-hypatia`) or set `skills: false` on it, '
-        + 'otherwise the agent gets the agent-driven memory protocol this plugin already performs',
-      )
-      continue
+    // Guarded per skill: one unreadable file or one registry rejection used to
+    // throw out of the loop, so every skill after it — a set decided by readdir
+    // order, not by anything the user could reason about — was silently never
+    // registered, with one warning naming only the first casualty.
+    try {
+      const { attributes, body } = parseFrontmatter(readFileSync(skillFile, 'utf8'))
+      const skillName = attributes.name ?? entry.name
+      const existing = await ctx.skills.get(skillName).catch(() => undefined)
+      if (existing !== undefined && existing.provider !== provider) {
+        status.warn(
+          `skill "${skillName}" is already provided by ${existing.provider}; `
+          + 'this plugin replaces dsh-hypatia — remove it from the profile '
+          + '(`dsh plugin --profile <name> remove dsh-hypatia`) or set `skills: false` on it, '
+          + 'otherwise the agent gets the agent-driven memory protocol this plugin already performs',
+        )
+        continue
+      }
+      ctx.skills.register({
+        name: skillName,
+        description: attributes.description ?? '',
+        content: body,
+        path: skillFile,
+        source: 'bundled',
+        provider,
+        // A TAGGED UNION, not a path: DSH validates the loaded skill against
+        // `{kind:'directory',path} | {kind:'url',url} | {kind:'opaque'}` and a
+        // bare string fails that check at LOAD time, not registration — the
+        // skill appears in the registry and every attempt to read it comes back
+        // as `"value.resourceBase" must match exactly one oneOf branch
+        // (matched 0)` — what the agent hit on its first two calls once this
+        // plugin took over the skill names from dsh-hypatia.
+        resourceBase: { kind: 'directory', path: dirname(skillFile) },
+        invocation: { modelInvocable: true, userInvocable: attributes['user-invocable'] !== 'false' },
+      })
+      registered.push(skillName)
+    } catch (error) {
+      status.warn(`skill "${entry.name}" not registered: ${String(error)}`)
     }
-    ctx.skills.register({
-      name: skillName,
-      description: attributes.description ?? '',
-      content: body,
-      path: skillFile,
-      source: 'bundled',
-      provider,
-      // A TAGGED UNION, not a path: DSH validates the loaded skill against
-      // `{kind:'directory',path} | {kind:'url',url} | {kind:'opaque'}` and a
-      // bare string fails that check at LOAD time, not registration — the
-      // skill appears in the registry and every attempt to read it comes back
-      // as `"value.resourceBase" must match exactly one oneOf branch
-      // (matched 0)` — what the agent hit on its first two calls once this
-      // plugin took over the skill names from dsh-hypatia.
-      resourceBase: { kind: 'directory', path: dirname(skillFile) },
-      invocation: { modelInvocable: true, userInvocable: attributes['user-invocable'] !== 'false' },
-    })
-    registered.push(skillName)
   }
   if (registered.length > 0) status.info(`registered bundled skills: ${registered.join(', ')}`)
   return registered

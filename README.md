@@ -138,6 +138,14 @@ agent/session-start ──▶ rules/taboos inject()
   of `|` and `>` inside quotes still qualifies. Everything else goes to the
   human. The plugin's own writes never take this path.
 
+  Scope, measured rather than assumed: in DSH a bash call raises an approval
+  request **only** when the sandbox denies it and the model retries with
+  `sandbox_permissions`. Retrieval (`query`, `search`, `list`, `knowledge-get`)
+  runs inside a `workspace-write` sandbox and never asks, with or without this
+  plugin. What this answers is the hypatia **write** — `~/.hypatia` is outside
+  the workspace, so `knowledge-create` and friends are denied, escalated, and
+  would otherwise stop on a prompt every time the user says "remember this".
+
 - **Skills** are bundled: `hypatia-memory` in this plugin's variant (the
   automatic layer writes, the agent retrieves), plus byte-identical copies of
   the repository's `hypatia` CLI reference and `hypatia-dream`, carried because
@@ -229,7 +237,7 @@ needs a profile reload; every other switch applies immediately.
 | Task in `failed` state | A CLI or model error persisted after `maxAttempts`. Failed `log-message` records are pruned at the next startup, since the watermark re-derives their range; other kinds are kept for inspection — delete one to let the next trigger re-create it |
 | Watermark says logged, but the shelf has no entries | The shelf was reset or switched after logging. Handled at startup: `housekeeping.reconcileOnStartup` resets any row whose session has no `msg-*` left, and that session is re-logged — and re-consolidated — from the start on its next activity. A shelf query that fails leaves the row untouched. A session whose messages were all deleted on purpose is indistinguishable and is logged again; turn the switch off if that matters |
 | Duplicate `msg-*` after weird manual edits | Delete the entry in hypatia and lower `lastLoggedSeq` for that session in the state domain — backfill recreates it once |
-| The agent's own `hypatia` call still asks for approval | `autoApprove: false` (needs a profile reload to change), the command pipes/redirects/chains outside quotes, or its first word is not one of `binaries` — only plain calls are answered, by design |
+| The agent's own `hypatia` write still asks for approval | `autoApprove: false` (needs a profile reload to change), the command pipes/redirects/chains outside quotes, or its first word is not one of `binaries` — only plain calls are answered, by design. Reads never reach approval at all, so nothing to fix there |
 | The agent got a memory protocol that tells it to log messages by hand | `dsh-hypatia` is still installed and registered the skill names first; remove it from the profile — this plugin logs a warning naming the other provider at startup |
 | Project scope looks wrong | Scope = git-root basename of the session cwd (falls back to basename); two same-named checkouts share a scope by design |
 
