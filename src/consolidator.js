@@ -307,7 +307,9 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
       return { resetTokens: false, advanceCheckpoint: false }
     }
     const current = progress.get(sessionId) ?? EMPTY_PROGRESS
-    const session = sessions.get(sessionId)
+    // Awaited: the resolver falls back to persistence for a session the store
+    // will never publish again (see persisted-session.js).
+    const session = await sessions.get(sessionId)
     if (session === undefined) {
       status.warn(`consolidation deferred for ${sessionId}: session not live`)
       return { resetTokens: false, advanceCheckpoint: false }
@@ -459,7 +461,7 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
       return
     }
     warnedNoRoute = false
-    const session = sessions.get(task.sessionId)
+    const session = await sessions.get(task.sessionId)
     if (session === undefined) {
       throw new TaskDeferredError(`session ${task.sessionId} is not loaded; deferred until it is`)
     }

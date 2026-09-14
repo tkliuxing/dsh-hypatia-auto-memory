@@ -37,6 +37,7 @@ import { countLoggableMessages, createCollector, formatSpan } from './collector.
 import { createCascade } from './cascade.js'
 import { createConsolidator, PLUGIN_NAME } from './consolidator.js'
 import { createRecall } from './recall.js'
+import { createPersistedSessions } from './persisted-session.js'
 import { createAutoApprove } from './auto-approve.js'
 import { registerSkills } from './skills.js'
 import { backfillConsolidation, pruneVanishedSessions, reconcileProgress } from './housekeeping.js'
@@ -119,11 +120,33 @@ function applyCollect(ctx, cordisConfig) {
         : shared.consolidator.onSessionEnd(sessionId, session),
     })
 
+    // Live store first, storage second. `session/created` — the signal that
+    // wakes a deferred task — fires only where an agent runs, so a finished
+    // session (and every subagent session) may never emit it again; storage
+    // supplies the same events without publishing anything. Late-bound: a
+    // composition without `sessionPersistence` keeps today's behavior, which is
+    // to wait. See persisted-session.js.
+    let loadPersisted = async () => undefined
+    const resolveSession = async (sessionId) => collector.sessionFor(sessionId) ?? await loadPersisted(sessionId)
+
+    ctx.plugin({
+      name: `${name}/persisted-sessions`,
+      inject: ['sessionPersistence'],
+      apply: (c) => {
+        const store = createPersistedSessions({ persistence: c.sessionPersistence, status })
+        loadPersisted = store.get
+        c.effect(() => () => {
+          loadPersisted = async () => undefined
+          store.clear()
+        }, `${name}: release persisted sessions`)
+      },
+    })
+
     /** Log executor: re-read the span, format per protocol, write idempotently. */
     queue.registerExecutor('log-message', async (task) => {
       // Resolved through the collector, not `ctx.sessions`: a session closing
       // down has already left the store while its final span is still queued.
-      const session = collector.sessionFor(task.sessionId)
+      const session = await resolveSession(task.sessionId)
       if (session === undefined) {
         throw new TaskDeferredError(`session ${task.sessionId} is not loaded; deferred until it is`)
       }
@@ -179,7 +202,7 @@ function applyCollect(ctx, cordisConfig) {
      * seq, then link every message logged so far to it.
      */
     queue.registerExecutor('session-node', async (task) => {
-      const session = collector.sessionFor(task.sessionId)
+      const session = await resolveSession(task.sessionId)
       if (session === undefined) {
         throw new TaskDeferredError(`session ${task.sessionId} is not loaded; deferred until it is`)
       }
@@ -280,8 +303,9 @@ function applyCollect(ctx, cordisConfig) {
           queue,
           progress: state.progress,
           // Same resolver as the log executor: end-of-session consolidation runs
-          // against a session the store has already released.
-          sessions: { get: collector.sessionFor },
+          // against a session the store has already released — and a startup
+          // backfill runs against one it may never publish again.
+          sessions: { get: resolveSession },
           llm: c.llm,
           cli,
           writer,

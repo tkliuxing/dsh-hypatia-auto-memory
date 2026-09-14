@@ -137,6 +137,17 @@ agent/session-start ──▶ rules/taboos inject()
   loading the session. Without that gate every restart would spend one model
   call per session carrying any tail at all.
 
+  Those tasks then read their events from **storage**, not only from the live
+  store. `session/created` — the signal that wakes a deferred task — fires only
+  where an agent actually runs, so a finished session may never emit it again,
+  and a subagent session (which the sidebar does not even list) almost certainly
+  will not: one sat `deferred` across a restart and stayed deferred while its
+  transcript was open on screen. `sessionPersistence.load()` returns the same
+  log without publishing anything, and the executors use only `snapshotEvents`,
+  `inheritedEventCount`, `seq` and `header`, so a tail nothing will reopen still
+  becomes knowledge. A composition without `sessionPersistence` behaves as
+  before: the task waits.
+
 - **Recall** preloads project/global rules and taboos at session start. Nothing
   else is pushed. Retrieval is the agent's job through the bundled skill, which
   is what `docs/memory-nolinear.md` prescribes for agents that hold context and
@@ -246,7 +257,7 @@ needs a profile reload; every other switch applies immediately.
 | Logging works, no summaries | `consolidation.models` is empty or invalid — one warning at first trigger |
 | Summaries but no `sum2-*` | Fewer than `cascade.batchSize` unarchived tier-1 summaries in that project yet |
 | Work units have no relationships | No embedding model on the shelf (`similar` fails), or every candidate was beyond `dedupMaxDistance` |
-| Task in `deferred` state | Its session is not loaded — DSH loads sessions lazily. Not an error: it spends no attempts and resumes by itself the next time that session is opened |
+| Task in `deferred` state | Neither the live store nor persistence could supply its session. Not an error: it spends no attempts and runs as soon as one of them can. Normally storage answers immediately — the state persists only when `sessionPersistence` is absent from the composition, or its read failed (look for `could not be read` in the log) |
 | Task in `failed` state | A CLI or model error persisted after `maxAttempts`. Failed `log-message` records are pruned at the next startup, since the watermark re-derives their range; other kinds are kept for inspection — delete one to let the next trigger re-create it |
 | Watermark says logged, but the shelf has no entries | The shelf was reset or switched after logging. Handled at startup: `housekeeping.reconcileOnStartup` resets any row whose session has no `msg-*` left, and that session is re-logged — and re-consolidated — from the start on its next activity. A shelf query that fails leaves the row untouched. A session whose messages were all deleted on purpose is indistinguishable and is logged again; turn the switch off if that matters |
 | Duplicate `msg-*` after weird manual edits | Delete the entry in hypatia and lower `lastLoggedSeq` for that session in the state domain — backfill recreates it once |
