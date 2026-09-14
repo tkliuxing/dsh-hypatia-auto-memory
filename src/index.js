@@ -39,7 +39,7 @@ import { createConsolidator, PLUGIN_NAME } from './consolidator.js'
 import { createRecall } from './recall.js'
 import { createAutoApprove } from './auto-approve.js'
 import { registerSkills } from './skills.js'
-import { pruneVanishedSessions, reconcileProgress } from './housekeeping.js'
+import { backfillConsolidation, pruneVanishedSessions, reconcileProgress } from './housekeeping.js'
 
 export const name = 'dsh-hypatia-auto-memory'
 
@@ -225,27 +225,47 @@ function applyCollect(ctx, cordisConfig) {
     await collector.backfillLiveSessions()
     status.info('collector running (backfill complete)')
 
-    // Rows and tasks of sessions DSH no longer has. A child fiber, because it
-    // needs `sessionPersistence` for the full listing — live sessions alone
-    // would make every unloaded session look gone. Registered only after the
-    // reconcile pass above, so the two never act on one row at once.
-    if (configHandle.get().housekeeping?.pruneVanishedSessions !== false) {
+    // Both passes need `sessionPersistence` for the full listing — live sessions
+    // alone would make every unloaded session look gone, and carry the cwd a
+    // scope is resolved from. A child fiber, registered only after the reconcile
+    // pass above so the two never act on one row at once. Each pass keeps its
+    // own switch: turning pruning off must not also stop consolidation backfill.
+    const housekeeping = configHandle.get().housekeeping ?? {}
+    if (housekeeping.pruneVanishedSessions !== false || housekeeping.backfillConsolidation !== false) {
       ctx.plugin({
         name: `${name}/housekeeping`,
         inject: ['sessionPersistence'],
         apply: (c) => {
           void (async () => {
             const headers = await c.sessionPersistence.list()
+            const cwdById = new Map()
+            for (const header of headers) {
+              const id = String(header?.id ?? '')
+              if (id !== '' && header?.cwd !== undefined) cwdById.set(id, String(header.cwd))
+            }
             const knownSessionIds = new Set(headers.map((header) => String(header?.id ?? '')).filter((id) => id !== ''))
-            await pruneVanishedSessions({
-              progress: state.progress,
-              queue,
-              knownSessionIds,
-              isLive: (id) => ctx.sessions.get(id) !== undefined,
-              status,
-            })
+            if (housekeeping.pruneVanishedSessions !== false) {
+              await pruneVanishedSessions({
+                progress: state.progress,
+                queue,
+                knownSessionIds,
+                isLive: (id) => ctx.sessions.get(id) !== undefined,
+                status,
+              })
+            }
+            // After pruning, so a vanished session's tail is never queued.
+            if (housekeeping.backfillConsolidation !== false) {
+              await backfillConsolidation({
+                progress: state.progress,
+                queue,
+                cwdFor: (id) => cwdById.get(id),
+                projectForCwd: collector.projectForCwd,
+                minNewTokens: configHandle.get().consolidation.minNewTokens,
+                status,
+              })
+            }
           })().catch((error) => {
-            status.warn(`progress prune skipped: ${String(error)}`)
+            status.warn(`startup housekeeping skipped: ${String(error)}`)
           })
         },
       })

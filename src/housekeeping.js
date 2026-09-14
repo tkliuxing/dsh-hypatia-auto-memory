@@ -104,3 +104,58 @@ export async function pruneVanishedSessions({ progress, queue, knownSessionIds, 
   }
   return { removed, skipped: false }
 }
+
+/**
+ * Consolidate a logged tail that the in-session trigger never reached.
+ *
+ * The session-end trigger cannot survive a process restart. DSH does run its
+ * close path at shutdown — it appends `session/end-seed` to the open session —
+ * but nothing this plugin enqueues there becomes durable before the process is
+ * gone: measured on a live restart, the storage file was not written at all and
+ * the session came back with `lastConsolidatedSeq: 0`. A short session that
+ * never reached the turn/token thresholds thus produced no knowledge, which is
+ * exactly the case the session-end trigger was added for.
+ *
+ * Gated on the SAME floor as the live trigger and read from the row, not by
+ * loading the session: `pendingTokens` is the estimate accumulated up to the
+ * last turn that ended, so a tail too small to be worth a model call while the
+ * session was alive stays too small here. Without that gate every restart would
+ * spend one model call per session carrying any tail at all.
+ *
+ * A session DSH no longer lists is skipped (`cwdFor` returns undefined) — its
+ * row belongs to {@link pruneVanishedSessions}. One that is listed but not
+ * loaded is fine: the executor defers the task until that session is opened.
+ *
+ * @param {{
+ *   progress: any,
+ *   queue: { enqueue: (spec: any) => Promise<void> },
+ *   cwdFor: (sessionId: string) => string | undefined,
+ *   projectForCwd: (cwd: string) => Promise<string>,
+ *   minNewTokens: number,
+ *   status: import('./status.js').StatusLog,
+ * }} deps
+ * @returns {Promise<{enqueued: string[], skippedBelowFloor: number}>}
+ */
+export async function backfillConsolidation({ progress, queue, cwdFor, projectForCwd, minNewTokens, status }) {
+  if (typeof progress.entries !== 'function') return { enqueued: [], skippedBelowFloor: 0 }
+  const enqueued = []
+  let skippedBelowFloor = 0
+  for (const [sessionId, row] of [...progress.entries()]) {
+    const fromSeq = row?.lastConsolidatedSeq ?? 0
+    const toSeq = row?.lastLoggedSeq ?? 0
+    if (toSeq <= fromSeq) continue
+    if ((row?.pendingTokens ?? 0) < minNewTokens) {
+      skippedBelowFloor += 1
+      continue
+    }
+    const cwd = cwdFor(sessionId)
+    if (cwd === undefined) continue
+    const project = await projectForCwd(cwd)
+    await queue.enqueue({ kind: 'consolidate', sessionId, fromSeq, toSeq, project, immediate: true })
+    enqueued.push(sessionId)
+  }
+  if (enqueued.length > 0) {
+    status.info(`consolidation backfill: queued ${enqueued.length} session(s) whose logged tail was never consolidated`)
+  }
+  return { enqueued, skippedBelowFloor }
+}

@@ -59,7 +59,9 @@ session/event (emit)
   │                 ├─ consolidate  ──▶ ctx.llm.stream ──▶ sum-* (summary 1) + wu-*
   │                 └─ cascade      ──▶ $not-summaried ──▶ sum<N>-* (summary N)
   └─ session/title | compaction/summary ──▶ session-node ──▶ session-<sid> + belongTo
-session/disposed ──▶ final flush + consolidation, thresholds waived
+session/disposed ──▶ final flush + consolidation, thresholds waived (a session
+                     closed while DSH keeps running; a restart is covered by the
+                     startup consolidation backfill instead)
 agent/session-start ──▶ rules/taboos inject()
 ```
 
@@ -124,6 +126,16 @@ agent/session-start ──▶ rules/taboos inject()
   removes the row and tasks of a session DSH no longer has. Resetting costs a
   re-log and a re-consolidation, so both passes act only on positive evidence:
   a failed shelf query or an empty session listing changes nothing.
+
+  A third pass consolidates what a restart interrupted. The session-end trigger
+  does not survive one: DSH runs its close path at shutdown (it appends
+  `session/end-seed`), but nothing queued there becomes durable before the
+  process is gone — measured on a live restart, the storage file was not written
+  and the session came back with `lastConsolidatedSeq: 0`. So a row whose logged
+  tail was never consolidated is queued at the next startup, gated by the same
+  `consolidation.minNewTokens` floor and read from the row rather than by
+  loading the session. Without that gate every restart would spend one model
+  call per session carrying any tail at all.
 
 - **Recall** preloads project/global rules and taboos at session start. Nothing
   else is pushed. Retrieval is the agent's job through the bundled skill, which
@@ -196,6 +208,7 @@ hypatia-auto-memory:
   housekeeping:
     reconcileOnStartup: true     # reset rows whose session has no msg-* left in the shelf
     pruneVanishedSessions: true  # drop rows and tasks of sessions DSH no longer has
+    backfillConsolidation: true  # consolidate a logged tail the in-session trigger never reached
 ```
 
 The cordis config block on the bundle row only carries skill packaging:

@@ -75,6 +75,11 @@ export const DEFAULTS = {
     reconcileOnStartup: true,
     // Drop the row and tasks of a session DSH no longer has.
     pruneVanishedSessions: true,
+    // Consolidate a logged tail the in-session trigger never reached. A process
+    // restart takes the session-end path with it, so a short session would
+    // otherwise stay logged-but-never-distilled. Gated by the same
+    // `consolidation.minNewTokens` floor, read from the progress row.
+    backfillConsolidation: true,
   },
 }
 
@@ -125,6 +130,7 @@ export const SettingsSchema = z.object({
   housekeeping: z.object({
     reconcileOnStartup: z.boolean().default(DEFAULTS.housekeeping.reconcileOnStartup),
     pruneVanishedSessions: z.boolean().default(DEFAULTS.housekeeping.pruneVanishedSessions),
+    backfillConsolidation: z.boolean().default(DEFAULTS.housekeeping.backfillConsolidation),
   }).default(DEFAULTS.housekeeping),
 })
 

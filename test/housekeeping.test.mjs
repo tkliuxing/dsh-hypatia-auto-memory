@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { pruneVanishedSessions, reconcileProgress } from '../src/housekeeping.js'
+import { backfillConsolidation, pruneVanishedSessions, reconcileProgress } from '../src/housekeeping.js'
 import { EMPTY_PROGRESS } from '../src/progress.js'
 
 function progressTable(seed) {
@@ -105,4 +105,54 @@ test('an empty session listing prunes nothing', async () => {
   assert.equal(progress.map.size, 2)
   assert.deepEqual(queue.forgotten, [])
   assert.match(status.lines[0][1], /not proof that none exist/)
+})
+
+function enqueueingQueue() {
+  const specs = []
+  return { specs, enqueue: async (spec) => { specs.push(spec) } }
+}
+
+const CWDS = { live: '/w/proj', gone: undefined }
+const projectForCwd = async (cwd) => cwd.split('/').pop()
+
+test('backfill consolidates a logged tail the in-session trigger never reached', async () => {
+  // A restart takes the session-end trigger with it: measured on a live
+  // restart, nothing was written and the session came back unconsolidated.
+  const progress = progressTable({ live: row({ lastLoggedSeq: 900, lastConsolidatedSeq: 400, pendingTokens: 1200 }) })
+  const queue = enqueueingQueue()
+  const result = await backfillConsolidation({
+    progress, queue, cwdFor: (id) => CWDS[id], projectForCwd, minNewTokens: 800, status: quiet(),
+  })
+
+  assert.deepEqual(result.enqueued, ['live'])
+  assert.deepEqual(queue.specs, [{
+    kind: 'consolidate', sessionId: 'live', fromSeq: 400, toSeq: 900, project: 'proj', immediate: true,
+  }])
+})
+
+test('backfill respects the same token floor as the live trigger', async () => {
+  // Otherwise every restart spends one model call per session with any tail.
+  const progress = progressTable({ live: row({ lastLoggedSeq: 900, lastConsolidatedSeq: 400, pendingTokens: 799 }) })
+  const queue = enqueueingQueue()
+  const result = await backfillConsolidation({
+    progress, queue, cwdFor: (id) => CWDS[id], projectForCwd, minNewTokens: 800, status: quiet(),
+  })
+
+  assert.deepEqual(result.enqueued, [])
+  assert.equal(result.skippedBelowFloor, 1)
+  assert.deepEqual(queue.specs, [])
+})
+
+test('backfill ignores a fully consolidated session and one DSH no longer lists', async () => {
+  const progress = progressTable({
+    live: row({ lastLoggedSeq: 900, lastConsolidatedSeq: 900, pendingTokens: 5000 }),
+    gone: row({ lastLoggedSeq: 900, lastConsolidatedSeq: 0, pendingTokens: 5000 }),
+  })
+  const queue = enqueueingQueue()
+  const result = await backfillConsolidation({
+    progress, queue, cwdFor: (id) => CWDS[id], projectForCwd, minNewTokens: 800, status: quiet(),
+  })
+
+  assert.deepEqual(result.enqueued, [], 'no tail, and no session to resolve a scope from')
+  assert.deepEqual(queue.specs, [])
 })

@@ -366,6 +366,10 @@ export function createCollector({ ctx, queue, progress, getConfig, status, onTur
   return {
     backfillLiveSessions,
     projectFor,
+    // Startup housekeeping resolves a scope from a persisted session header's
+    // cwd, with no Session to hand — `projectFor` needs one, and caches by its
+    // id, so it cannot serve that path.
+    projectForCwd: resolveProjectForCwd,
     sessionFor,
     /** Drain the in-memory pending-token counter (called after a consolidation trigger). */
     takePendingTokens(sessionId) {
