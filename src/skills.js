@@ -37,43 +37,61 @@ export function parseFrontmatter(source) {
   return { attributes, body: source.slice(match[0].length) }
 }
 
+/** Filesystem sources whose skills outrank plugin registrations. */
+const OUTRANKS_PLUGINS = new Set(['project-dsh', 'project-agents'])
+/** Filesystem sources that plugin registrations outrank. */
+const OUTRANKED_BY_PLUGINS = new Set(['custom', 'user-dsh', 'user-agents'])
+
 /**
- * What to do about a skill name another provider already holds.
+ * Where an already-registered copy of a skill stands against this plugin's.
  *
- * Two holders are realistic, and they need different fixes. `dsh-hypatia` —
- * the plugin this one replaces — registers the same three names. And since
- * hypatia #20, `hypatia skill install --agent codex` writes the canonical
- * skills to `~/.agents/skills`, which DSH also reads, as user skills ranked
- * above plugin registrations. Telling everyone to remove `dsh-hypatia` sent the
- * second case looking for a plugin that was not installed.
+ * DSH merges same-name skills by rank within one layer: project entries
+ * outrank runtime (plugin) entries, which outrank user entries
+ * (`packages/skill`: project-dsh 100, project-agents 200, runtime 250, custom
+ * 300, user-dsh 400, user-agents 500, bundled 600). Only another RUNTIME
+ * registration is settled by order instead — the registry keeps the first and
+ * ignores a second under the same name.
  *
- * @param {{provider?: string, path?: string, resourceBase?: {kind?: string, path?: string}}} existing
- * @returns {string}
+ * - `project`: a project skill; it wins whatever this plugin does.
+ * - `below`: a custom, user or DSH-bundled skill on disk; once registered,
+ *   this plugin's copy wins.
+ * - `runtime`: another plugin's registration (dsh-hypatia), or a provider this
+ *   code does not know; first come, first served.
+ *
+ * Plugins pass `source: 'bundled'` too, so `bundled` counts as a disk skill
+ * only when the filesystem provider holds it.
+ *
+ * @param {{provider?: string, source?: string}} existing
+ * @returns {'project' | 'below' | 'runtime'}
  */
-export function shadowAdvice(existing) {
-  if (existing?.provider === 'dsh-hypatia') {
-    return 'remove dsh-hypatia from the profile (`dsh plugin --profile <name> remove dsh-hypatia`) '
-      + 'or set `skills: false` on it'
+export function precedenceOf(existing) {
+  const source = existing?.source
+  if (OUTRANKS_PLUGINS.has(source)) return 'project'
+  if (OUTRANKED_BY_PLUGINS.has(source)) return 'below'
+  if (source === 'bundled' && existing?.provider === 'filesystem') return 'below'
+  return 'runtime'
+}
+
+/** Directory of an already-registered copy, when it lives on disk. */
+function directoryOf(existing) {
+  if (existing?.resourceBase?.kind === 'directory' && typeof existing.resourceBase.path === 'string') {
+    return existing.resourceBase.path
   }
-  const onDisk = existing?.resourceBase?.kind === 'directory'
-    ? existing.resourceBase.path
-    : typeof existing?.path === 'string' ? dirname(existing.path) : undefined
-  if (typeof onDisk === 'string' && onDisk !== '') {
-    return `delete or rename ${onDisk} — \`hypatia skill install --agent codex\` writes the canonical `
-      + 'skills to ~/.agents/skills, which DSH reads as user skills ahead of this plugin'
-  }
-  return `disable the copy ${existing?.provider ?? 'that provider'} registers`
+  return typeof existing?.path === 'string' ? dirname(existing.path) : undefined
 }
 
 /**
- * Register every packaged skill, refusing to shadow another provider's.
+ * Register every packaged skill, yielding only where DSH itself would not let
+ * this plugin's copy win.
  *
- * Shadowing is refused rather than forced because the registry keeps whoever
- * registered first, and the other copy is usually the canonical
- * `hypatia-memory` — the agent-driven protocol, which asks the model to log
- * every message by hand and needs host hooks DSH does not have. Better to say
- * so loudly, naming where the other copy lives, than to let the two disagree
- * in the model's context.
+ * An earlier version refused whenever ANY provider already held the name. That
+ * is right for dsh-hypatia — another runtime registration, where the registry
+ * keeps the first — and wrong for everything DSH ranks below plugins: a stray
+ * `~/.agents/skills/hypatia-dream` silently displaced this plugin's copy, and
+ * the canonical `hypatia-memory` that `hypatia skill install --agent codex`
+ * writes there — the agent-driven protocol, which needs host hooks DSH does
+ * not have — could have displaced this plugin's variant. DSH would have put
+ * this plugin first both times; the refusal gave the win away.
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx - context injecting `skills`.
  * @param {string} skillsDir - directory of `<name>/SKILL.md` folders.
@@ -103,15 +121,34 @@ export async function registerSkills(ctx, skillsDir, status, provider) {
       const skillName = attributes.name ?? entry.name
       const existing = await ctx.skills.get(skillName).catch(() => undefined)
       if (existing !== undefined && existing.provider !== provider) {
-        const holder = existing.source ? `${existing.provider} (${existing.source})` : existing.provider
-        const why = skillName === 'hypatia-memory'
-          ? ' — the agent-driven memory protocol, which needs host hooks DSH does not have'
-          : ''
-        status.warn(
-          `skill "${skillName}" is already provided by ${holder}, so the agent gets that copy${why}. `
-          + `To use this plugin's copy, ${shadowAdvice(existing)}`,
-        )
-        continue
+        const standing = precedenceOf(existing)
+        const where = directoryOf(existing)
+        if (standing === 'runtime') {
+          const holder = existing.source ? `${existing.provider} (${existing.source})` : existing.provider
+          const why = skillName === 'hypatia-memory'
+            ? ' — the agent-driven memory protocol, which needs host hooks DSH does not have'
+            : ''
+          const advice = existing.provider === 'dsh-hypatia'
+            ? 'remove dsh-hypatia from the profile (`dsh plugin --profile <name> remove dsh-hypatia`) '
+              + 'or set `skills: false` on it'
+            : `disable the copy ${existing.provider} registers`
+          status.warn(
+            `skill "${skillName}" is already registered by ${holder}, and DSH keeps the first runtime `
+            + `registration, so the agent gets that copy${why}. To use this plugin's copy, ${advice}`,
+          )
+          continue
+        }
+        if (standing === 'project') {
+          status.warn(
+            `skill "${skillName}": the project copy${where ? ` at ${where}` : ''} (${existing.source}) `
+            + 'outranks plugin skills in DSH, so the agent gets it; delete it to use this plugin\'s copy',
+          )
+        } else {
+          status.info(
+            `skill "${skillName}": this plugin's copy takes precedence over the ${existing.source} copy`
+            + `${where ? ` at ${where}` : ''} — DSH ranks plugin skills above user and bundled ones`,
+          )
+        }
       }
       ctx.skills.register({
         name: skillName,

@@ -50,14 +50,15 @@ leaving `dsh-hypatia` installed hands the agent exactly the agent-driven
 protocol whose failure this plugin exists to fix. If it has to stay for some
 other reason, `skills: false` on its bundle row is the minimum.
 
-The same shadowing can come from a **user skill**. Since hypatia #20,
-`hypatia skill install --agent codex` writes the canonical `hypatia`,
-`hypatia-memory` and `hypatia-dream` into `~/.agents/skills` — a directory DSH
-also reads, as user skills ranked above plugin registrations. The canonical
-`hypatia-memory` is the agent-driven protocol and needs host hooks DSH does not
-have. On a machine running this plugin, skip the Codex install, or delete
-`~/.agents/skills/hypatia-memory` afterwards; the startup warning names the
-directory it found.
+A **user skill** of the same name needs no action. DSH ranks same-name skills
+by origin — project skills (`<repo>/.dsh/skills`, `<repo>/.agents/skills`)
+above plugin registrations, plugin registrations above user, custom and
+bundled ones (`~/.dsh/skills`, `~/.agents/skills`, DSH's own bundle) — so this
+plugin's copy wins over, for instance, the canonical `hypatia-memory` that
+`hypatia skill install --agent codex` writes to `~/.agents/skills`. The startup
+log notes each copy it takes precedence over. A **project** skill of the same
+name outranks every plugin; the startup warning names its directory — delete it
+to use this plugin's copy.
 
 ## How it works
 
@@ -181,8 +182,10 @@ agent/session-start ──▶ rules/taboos inject()
 - **Skills** are bundled: `hypatia-memory` in this plugin's variant (the
   automatic layer writes, the agent retrieves), plus byte-identical copies of
   the repository's `hypatia` CLI reference and `hypatia-dream`, carried because
-  removing `dsh-hypatia` would otherwise take them with it. A skill already
-  registered by another provider is left alone and reported.
+  removing `dsh-hypatia` would otherwise take them with it. Another plugin's
+  registration of the same name is left alone and reported, since DSH keeps the
+  first runtime registration; a user or bundled copy on disk is outranked and
+  loses; a project copy wins and is reported.
 
 ## Configuration
 
@@ -271,7 +274,7 @@ needs a profile reload; every other switch applies immediately.
 | Watermark says logged, but the shelf has no entries | The shelf was reset or switched after logging. Handled at startup: `housekeeping.reconcileOnStartup` resets any row whose session has no `msg-*` left, and that session is re-logged — and re-consolidated — from the start on its next activity. A shelf query that fails leaves the row untouched. A session whose messages were all deleted on purpose is indistinguishable and is logged again; turn the switch off if that matters |
 | Duplicate `msg-*` after weird manual edits | Delete the entry in hypatia and lower `lastLoggedSeq` for that session in the state domain — backfill recreates it once |
 | The agent's own `hypatia` write still asks for approval | `autoApprove: false` (needs a profile reload to change), the command pipes/redirects/chains outside quotes, or its first word is not one of `binaries` — only plain calls are answered, by design. Reads never reach approval at all, so nothing to fix there |
-| The agent got a memory protocol that tells it to log messages by hand | Another provider registered `hypatia-memory` first: `dsh-hypatia` still in the profile, or a user skill such as `~/.agents/skills/hypatia-memory` (written by `hypatia skill install --agent codex`). The startup warning names the provider and, for a copy on disk, its directory — remove that one |
+| The agent got a memory protocol that tells it to log messages by hand | Another plugin registered `hypatia-memory` first (`dsh-hypatia` still in the profile), or a project skill of that name exists (`<repo>/.dsh/skills`, `<repo>/.agents/skills`), which outranks every plugin. The startup warning names which — and a project copy's directory. A user copy in `~/.agents/skills` cannot cause this: plugin skills outrank it |
 | Project scope looks wrong | Scope = git-root basename of the session cwd (falls back to basename); two same-named checkouts share a scope by design |
 
 ## Known limitations
