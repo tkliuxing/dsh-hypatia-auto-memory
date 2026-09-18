@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 
-import { parseFrontmatter, registerSkills } from '../src/skills.js'
+import { parseFrontmatter, registerSkills, shadowAdvice } from '../src/skills.js'
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -71,7 +71,34 @@ test('another provider is never shadowed, and the warning says what to do', asyn
   assert.deepEqual(names, [])
   assert.deepEqual(skills.registered, [])
   assert.match(status.lines[0], /already provided by dsh-hypatia/)
+  assert.match(status.lines[0], /host hooks DSH does not have/)
   assert.match(status.lines[0], /remove dsh-hypatia/)
+})
+
+test('a user skill on disk is named by its directory, not blamed on dsh-hypatia', async () => {
+  // Since hypatia #20, `skill install --agent codex` writes the canonical
+  // skills to ~/.agents/skills, which DSH reads ahead of plugin registrations.
+  // The old warning sent that case looking for a dsh-hypatia that was not there.
+  const dir = skillDir('hypatia-memory', 'name: hypatia-memory\ndescription: d')
+  const skills = fakeSkills({
+    'hypatia-memory': {
+      provider: 'filesystem',
+      source: 'user-agents',
+      resourceBase: { kind: 'directory', path: '/home/u/.agents/skills/hypatia-memory' },
+    },
+  })
+  const status = quiet()
+  await registerSkills({ skills }, dir, status, 'ham')
+
+  assert.match(status.lines[0], /already provided by filesystem \(user-agents\)/)
+  assert.match(status.lines[0], /delete or rename \/home\/u\/\.agents\/skills\/hypatia-memory/)
+  assert.match(status.lines[0], /hypatia skill install --agent codex/)
+  assert.doesNotMatch(status.lines[0], /dsh-hypatia/)
+})
+
+test('shadow advice falls back to the file path, then to the provider', () => {
+  assert.match(shadowAdvice({ provider: 'x', path: '/a/b/SKILL.md' }), /delete or rename \/a\/b /)
+  assert.equal(shadowAdvice({ provider: 'remote-skills' }), 'disable the copy remote-skills registers')
 })
 
 test('a re-register by this same plugin is allowed', async () => {

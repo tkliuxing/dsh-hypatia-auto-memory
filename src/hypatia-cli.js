@@ -122,13 +122,17 @@ export function createHypatiaCli(ctx, config) {
    * Run and require exit 0; throw with stderr context otherwise.
    *
    * A primary-key collision gets its own `DUPLICATE` code so the write helpers
-   * can treat it as an idempotent no-op. hypatia has no upsert and no
-   * `--if-not-exists` — both tables are plain `INSERT` with no `ON CONFLICT`
+   * can treat it as an idempotent no-op. `knowledge-create` has no upsert and
+   * no `--if-not-exists` — a plain `INSERT` with no `ON CONFLICT`
    * (`src/storage/sqlite_store.rs`) — so recognising the error text is the only
-   * way a replay can finish a half-written multi-step graph write. Matching on
-   * a message is unlovely; it is confined to this one function so that adding
-   * an upsert upstream is a single deletion here. Both backends are covered:
-   * SQLite reports `UNIQUE constraint failed:`, PostgreSQL `duplicate key`.
+   * way a replay can finish a half-written multi-step graph write.
+   * `statement-create` became idempotent in hypatia #20 (a repeat exits 0 with
+   * `Statement already exists`), but older binaries still reject a duplicate
+   * triple the same way, so this classification serves both. Matching on a
+   * message is unlovely; it is confined to this one function so that a
+   * knowledge upsert upstream is a single deletion here. Both backends are
+   * covered: SQLite reports `UNIQUE constraint failed:`, PostgreSQL
+   * `duplicate key`.
    *
    * @param {string[]} argv
    */
@@ -149,7 +153,10 @@ export function createHypatiaCli(ctx, config) {
   /**
    * Run a create that is expected to be replayed: a collision means the row is
    * already there, which is success for our purposes.
-   * @returns {Promise<boolean>} true when this call created the row.
+   * @returns {Promise<boolean>} true when this call created the row. Since
+   *   hypatia #20 a repeated `statement-create` also exits 0, so for a
+   *   statement `true` only means the triple exists now; no caller relies on
+   *   the difference.
    */
   async function runCreate(argv) {
     try {

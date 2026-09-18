@@ -50,6 +50,15 @@ leaving `dsh-hypatia` installed hands the agent exactly the agent-driven
 protocol whose failure this plugin exists to fix. If it has to stay for some
 other reason, `skills: false` on its bundle row is the minimum.
 
+The same shadowing can come from a **user skill**. Since hypatia #20,
+`hypatia skill install --agent codex` writes the canonical `hypatia`,
+`hypatia-memory` and `hypatia-dream` into `~/.agents/skills` — a directory DSH
+also reads, as user skills ranked above plugin registrations. The canonical
+`hypatia-memory` is the agent-driven protocol and needs host hooks DSH does not
+have. On a machine running this plugin, skip the Codex install, or delete
+`~/.agents/skills/hypatia-memory` afterwards; the startup warning names the
+directory it found.
+
 ## How it works
 
 ```
@@ -262,7 +271,7 @@ needs a profile reload; every other switch applies immediately.
 | Watermark says logged, but the shelf has no entries | The shelf was reset or switched after logging. Handled at startup: `housekeeping.reconcileOnStartup` resets any row whose session has no `msg-*` left, and that session is re-logged — and re-consolidated — from the start on its next activity. A shelf query that fails leaves the row untouched. A session whose messages were all deleted on purpose is indistinguishable and is logged again; turn the switch off if that matters |
 | Duplicate `msg-*` after weird manual edits | Delete the entry in hypatia and lower `lastLoggedSeq` for that session in the state domain — backfill recreates it once |
 | The agent's own `hypatia` write still asks for approval | `autoApprove: false` (needs a profile reload to change), the command pipes/redirects/chains outside quotes, or its first word is not one of `binaries` — only plain calls are answered, by design. Reads never reach approval at all, so nothing to fix there |
-| The agent got a memory protocol that tells it to log messages by hand | `dsh-hypatia` is still installed and registered the skill names first; remove it from the profile — this plugin logs a warning naming the other provider at startup |
+| The agent got a memory protocol that tells it to log messages by hand | Another provider registered `hypatia-memory` first: `dsh-hypatia` still in the profile, or a user skill such as `~/.agents/skills/hypatia-memory` (written by `hypatia skill install --agent codex`). The startup warning names the provider and, for a copy on disk, its directory — remove that one |
 | Project scope looks wrong | Scope = git-root basename of the session cwd (falls back to basename); two same-named checkouts share a scope by design |
 
 ## Known limitations
@@ -283,14 +292,18 @@ Deliberate, and worth knowing before you rely on them:
 - **No `session-<id>` node without a host summary.** The protocol forbids
   inventing one, and DSH emits no session-summary event of its own; the node is
   built from a `session/title` or `compaction/summary` when one appears.
-- **hypatia has no `knowledge-update`.** A second session title cannot replace
-  the first, and a work unit is never edited in place. Changing an entry means
-  delete + create, which loses `created_at` and its embedding, so the plugin
-  does not do it.
-- **Duplicate writes are detected by error text.** hypatia has no upsert and no
-  `--if-not-exists`, so `hypatia-cli.js` recognises `UNIQUE constraint failed:` /
-  `duplicate key` to make a replay idempotent. It is confined to one function;
-  an upstream upsert would delete it. `test/integration` asserts the strings.
+- **The plugin does not use `knowledge-update` yet.** hypatia gained it in #20
+  (it keeps `created_at`, discards the old vector and re-embeds on the next
+  flush), but older binaries lack it, so the plugin still never edits an entry
+  in place: a second session title does not replace the first, and a work unit
+  is never rewritten.
+- **Duplicate `knowledge-create` is detected by error text.** hypatia has no
+  upsert for knowledge entries, so `hypatia-cli.js` recognises
+  `UNIQUE constraint failed:` / `duplicate key` to make a replay idempotent.
+  `statement-create` has been idempotent on its own since hypatia #20 (a repeat
+  exits 0 with `Statement already exists`); on an older binary the same
+  error-text path covers it. The matching is confined to one function, and
+  `test/integration` accepts either statement behaviour.
 - **Adjudication and dedup need an embedding model.** On a shelf without one,
   `similar` fails outright and work units are stored with no relationship —
   never dropped.

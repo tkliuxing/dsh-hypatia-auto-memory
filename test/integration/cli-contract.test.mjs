@@ -62,17 +62,28 @@ test('hypatia CLI contracts the plugin parses', options, async (t) => {
     assert.equal(contentOf('p-empty').scopes, null, 'empty --scopes drops the field entirely')
   })
 
-  await t.test('duplicate writes fail with the text hypatia-cli.js keys on', () => {
-    // `runOk` classifies these as DUPLICATE so `runCreate` can treat a replay as
-    // an idempotent no-op. hypatia has no upsert, so this string IS the contract.
+  await t.test('duplicate writes are rejected with the text hypatia-cli.js keys on, or are no-ops', () => {
+    // `runOk` classifies a collision as DUPLICATE so `runCreate` can treat a
+    // replay as an idempotent no-op. Knowledge entries have no upsert, so for
+    // them this string IS the contract.
     const dupKnowledge = hyp(['knowledge-create', 'p-plain', '--data=y'])
     assert.equal(dupKnowledge.status, 1)
     assert.match(dupKnowledge.stderr, /UNIQUE constraint failed:|duplicate key/i)
 
+    // `statement-create` became idempotent in hypatia #20: a repeat exits 0 and
+    // leaves the stored statement alone. Older binaries still reject it with the
+    // UNIQUE error. Either is a successful replay to the plugin; anything else —
+    // a failure it would not classify as DUPLICATE — would wedge a graph write.
     hyp(['statement-create', 'p-plain', 'summary', 'p-trail'])
     const dupStatement = hyp(['statement-create', 'p-plain', 'summary', 'p-trail'])
-    assert.equal(dupStatement.status, 1)
-    assert.match(dupStatement.stderr, /UNIQUE constraint failed:|duplicate key/i)
+    const rejected = dupStatement.status === 1
+      && /UNIQUE constraint failed:|duplicate key/i.test(dupStatement.stderr)
+    const idempotent = dupStatement.status === 0
+      && /Statement already exists/.test(`${dupStatement.stdout}${dupStatement.stderr}`)
+    assert.ok(
+      rejected || idempotent,
+      `unexpected duplicate-statement behaviour: exit ${dupStatement.status}, ${dupStatement.stdout}${dupStatement.stderr}`,
+    )
   })
 
   await t.test('a missing knowledge entry is exit 0 with a parseable sentinel', () => {
