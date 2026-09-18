@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 
-import { parseFrontmatter, precedenceOf, registerSkills } from '../src/skills.js'
+import { holderKind, parseFrontmatter, registerSkills } from '../src/skills.js'
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -75,10 +75,10 @@ test('another plugin\'s registration is never shadowed, and the warning says wha
   assert.match(status.lines[0], /remove dsh-hypatia/)
 })
 
-test('a user skill on disk loses to this plugin, which registers anyway', async () => {
-  // DSH ranks plugin (runtime) skills above ~/.agents/skills. Refusing here
-  // handed the win to a stray user copy — or to the canonical hypatia-memory
-  // that `hypatia skill install --agent codex` writes to that directory.
+test('a user skill on disk is registered over, and still reported: it wins in agent sessions', async () => {
+  // Rank puts plugins above ~/.agents/skills, but only within one layer. Agent
+  // presets load disk skills in their own, nearer layer, so a session gets the
+  // disk copy whatever its rank — seen live with ~/.agents/skills/hypatia-dream.
   const dir = skillDir('hypatia-memory', 'name: hypatia-memory\ndescription: d')
   const skills = fakeSkills({
     'hypatia-memory': {
@@ -90,36 +90,36 @@ test('a user skill on disk loses to this plugin, which registers anyway', async 
   const status = quiet()
   const names = await registerSkills({ skills }, dir, status, 'ham')
 
-  assert.deepEqual(names, ['hypatia-memory'])
-  assert.match(status.lines[0], /takes precedence over the user-agents copy at \/home\/u\/\.agents\/skills\/hypatia-memory/)
+  assert.deepEqual(names, ['hypatia-memory'], 'registering is harmless and wins every global view')
+  assert.match(status.lines[0], /user-agents copy at \/home\/u\/\.agents\/skills\/hypatia-memory will be used in agent sessions/)
+  assert.match(status.lines[0], /host hooks DSH does not have/)
+  assert.match(status.lines[0], /Delete or rename that directory/)
   assert.doesNotMatch(status.lines.join('\n'), /dsh-hypatia/)
 })
 
-test('a project skill outranks every plugin: registered anyway, with a warning naming it', async () => {
-  const dir = skillDir('hypatia-memory', 'name: hypatia-memory\ndescription: d')
+test('a project skill is reported the same way, by its file path when no base is given', async () => {
+  const dir = skillDir('hypatia-dream', 'name: hypatia-dream\ndescription: d')
   const skills = fakeSkills({
-    'hypatia-memory': {
+    'hypatia-dream': {
       provider: 'filesystem',
       source: 'project-agents',
-      path: '/w/.agents/skills/hypatia-memory/SKILL.md',
+      path: '/w/.agents/skills/hypatia-dream/SKILL.md',
     },
   })
   const status = quiet()
   const names = await registerSkills({ skills }, dir, status, 'ham')
 
-  assert.deepEqual(names, ['hypatia-memory'], 'harmless: it simply loses while the project copy exists')
-  assert.match(status.lines[0], /project copy at \/w\/\.agents\/skills\/hypatia-memory \(project-agents\) outranks plugin skills/)
+  assert.deepEqual(names, ['hypatia-dream'])
+  assert.match(status.lines[0], /project-agents copy at \/w\/\.agents\/skills\/hypatia-dream will be used in agent sessions/)
+  assert.doesNotMatch(status.lines[0], /host hooks/, 'the protocol note is only for hypatia-memory')
 })
 
-test('precedence follows DSH\'s ranking, and "bundled" is a disk skill only from the filesystem', () => {
-  assert.equal(precedenceOf({ provider: 'filesystem', source: 'project-dsh' }), 'project')
-  assert.equal(precedenceOf({ provider: 'filesystem', source: 'project-agents' }), 'project')
-  for (const source of ['custom', 'user-dsh', 'user-agents']) {
-    assert.equal(precedenceOf({ provider: 'filesystem', source }), 'below', source)
+test('only the filesystem provider counts as a disk copy; plugins pass source "bundled" too', () => {
+  for (const source of ['project-dsh', 'project-agents', 'custom', 'user-dsh', 'user-agents', 'bundled']) {
+    assert.equal(holderKind({ provider: 'filesystem', source }), 'disk', source)
   }
-  assert.equal(precedenceOf({ provider: 'filesystem', source: 'bundled' }), 'below')
-  assert.equal(precedenceOf({ provider: 'dsh-hypatia', source: 'bundled' }), 'runtime', 'plugins pass "bundled" too')
-  assert.equal(precedenceOf({ provider: 'remote-skills' }), 'runtime')
+  assert.equal(holderKind({ provider: 'dsh-hypatia', source: 'bundled' }), 'runtime')
+  assert.equal(holderKind({ provider: 'remote-skills' }), 'runtime')
 })
 
 test('a re-register by this same plugin is allowed', async () => {

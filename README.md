@@ -50,15 +50,18 @@ leaving `dsh-hypatia` installed hands the agent exactly the agent-driven
 protocol whose failure this plugin exists to fix. If it has to stay for some
 other reason, `skills: false` on its bundle row is the minimum.
 
-A **user skill** of the same name needs no action. DSH ranks same-name skills
-by origin — project skills (`<repo>/.dsh/skills`, `<repo>/.agents/skills`)
-above plugin registrations, plugin registrations above user, custom and
-bundled ones (`~/.dsh/skills`, `~/.agents/skills`, DSH's own bundle) — so this
-plugin's copy wins over, for instance, the canonical `hypatia-memory` that
-`hypatia skill install --agent codex` writes to `~/.agents/skills`. The startup
-log notes each copy it takes precedence over. A **project** skill of the same
-name outranks every plugin; the startup warning names its directory — delete it
-to use this plugin's copy.
+A **skill on disk** of the same name — `~/.agents/skills`, `~/.dsh/skills`, a
+custom directory, or a project's `.dsh/skills` / `.agents/skills` — also wins,
+in every agent session. DSH's skill registry is layered per scope: the nearest
+layer's same-name entry wins outright, and rank (project > plugin > user)
+only breaks ties inside one layer. Agent presets (`st`, `standard`, …) mount
+their own filesystem skill provider in the preset's layer, nearer to the agent
+than this plugin's global registration. That includes the canonical
+`hypatia-memory` which `hypatia skill install --agent codex` writes to
+`~/.agents/skills`: it is the agent-driven protocol and needs host hooks DSH
+does not have. Delete or rename such a copy; the startup warning names its
+directory. The skill center shows the global view, so it can list this plugin
+as a skill's provider while sessions load the disk copy.
 
 ## How it works
 
@@ -184,8 +187,9 @@ agent/session-start ──▶ rules/taboos inject()
   the repository's `hypatia` CLI reference and `hypatia-dream`, carried because
   removing `dsh-hypatia` would otherwise take them with it. Another plugin's
   registration of the same name is left alone and reported, since DSH keeps the
-  first runtime registration; a user or bundled copy on disk is outranked and
-  loses; a project copy wins and is reported.
+  first runtime registration. A copy on disk is registered over but still wins
+  in agent sessions — presets load disk skills in a nearer layer — so it is
+  reported with its directory.
 
 ## Configuration
 
@@ -274,7 +278,8 @@ needs a profile reload; every other switch applies immediately.
 | Watermark says logged, but the shelf has no entries | The shelf was reset or switched after logging. Handled at startup: `housekeeping.reconcileOnStartup` resets any row whose session has no `msg-*` left, and that session is re-logged — and re-consolidated — from the start on its next activity. A shelf query that fails leaves the row untouched. A session whose messages were all deleted on purpose is indistinguishable and is logged again; turn the switch off if that matters |
 | Duplicate `msg-*` after weird manual edits | Delete the entry in hypatia and lower `lastLoggedSeq` for that session in the state domain — backfill recreates it once |
 | The agent's own `hypatia` write still asks for approval | `autoApprove: false` (needs a profile reload to change), the command pipes/redirects/chains outside quotes, or its first word is not one of `binaries` — only plain calls are answered, by design. Reads never reach approval at all, so nothing to fix there |
-| The agent got a memory protocol that tells it to log messages by hand | Another plugin registered `hypatia-memory` first (`dsh-hypatia` still in the profile), or a project skill of that name exists (`<repo>/.dsh/skills`, `<repo>/.agents/skills`), which outranks every plugin. The startup warning names which — and a project copy's directory. A user copy in `~/.agents/skills` cannot cause this: plugin skills outrank it |
+| The agent got a memory protocol that tells it to log messages by hand | Another plugin registered `hypatia-memory` first (`dsh-hypatia` still in the profile), or a `hypatia-memory` exists on disk — typically `~/.agents/skills/hypatia-memory`, written by `hypatia skill install --agent codex`. Agent presets load disk skills in a layer nearer than plugins, so it wins in sessions even though the skill center may list this plugin. Remove the copy the startup warning names |
+| Startup warnings never appear in the terminal | `dsh web` mounts no log exporter, so plugin log lines of any level go nowhere; the console exporter's default threshold would also drop warnings (warn is level 2, above info's 1). Mount a logger such as `dsh-logbook` or `dsh-boot-doctor` temporarily to read them |
 | Project scope looks wrong | Scope = git-root basename of the session cwd (falls back to basename); two same-named checkouts share a scope by design |
 
 ## Known limitations
