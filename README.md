@@ -59,8 +59,9 @@ their own filesystem skill provider in the preset's layer, nearer to the agent
 than this plugin's global registration. That includes the canonical
 `hypatia-memory` which `hypatia skill install --agent codex` writes to
 `~/.agents/skills`: it is the agent-driven protocol and needs host hooks DSH
-does not have. Delete or rename such a copy; the startup warning names its
-directory. The skill center shows the global view, so it can list this plugin
+does not have. Delete such a copy or move it out of the skills directory;
+renaming its directory in place is not enough, because DSH names a skill by its
+frontmatter `name`. The startup warning names the directory. The skill center shows the global view, so it can list this plugin
 as a skill's provider while sessions load the disk copy.
 
 ## How it works

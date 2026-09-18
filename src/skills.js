@@ -134,8 +134,9 @@ export async function registerSkills(ctx, skillsDir, status, provider) {
         status.warn(
           `skill "${skillName}": the ${existing.source ?? 'disk'} copy at ${where} will be used in agent `
           + `sessions instead of this plugin's${why} — agent presets load skills from disk in a layer `
-          + 'nearer to the agent than plugin registrations. Delete or rename that directory to use '
-          + 'this plugin\'s copy',
+          + 'nearer to the agent than plugin registrations. Delete it, or move it out of that skills '
+          + 'directory, to use this plugin\'s copy — renaming it in place is not enough, because DSH '
+          + 'names a skill by its frontmatter `name`, not its directory',
         )
       }
       ctx.skills.register({

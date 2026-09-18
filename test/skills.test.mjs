@@ -93,7 +93,10 @@ test('a user skill on disk is registered over, and still reported: it wins in ag
   assert.deepEqual(names, ['hypatia-memory'], 'registering is harmless and wins every global view')
   assert.match(status.lines[0], /user-agents copy at \/home\/u\/\.agents\/skills\/hypatia-memory will be used in agent sessions/)
   assert.match(status.lines[0], /host hooks DSH does not have/)
-  assert.match(status.lines[0], /Delete or rename that directory/)
+  assert.match(status.lines[0], /Delete it, or move it out of that skills directory/)
+  // Seen live: a copy renamed in place (hypatia-dream -> d-dream) still loaded
+  // as hypatia-dream, because the filesystem provider takes the frontmatter name.
+  assert.match(status.lines[0], /renaming it in place is not enough/)
   assert.doesNotMatch(status.lines.join('\n'), /dsh-hypatia/)
 })
 
