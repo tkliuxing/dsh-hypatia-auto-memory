@@ -16,6 +16,7 @@ import {
   type ConsolidationModelRoute,
   type LoadConsolidationModelCatalog,
 } from './consolidation-models'
+import { DEFAULT_SHELF, shelfChoices, type LoadShelfInventory, type ShelfInfo } from './shelves'
 import css from './SettingsCard.module.css'
 import { NS } from './locales'
 import './slot-contract'
@@ -36,6 +37,7 @@ const DEFAULT_CONSOLIDATION = {
 export interface ConfigShape {
   enabled?: boolean
   autoApprove?: boolean
+  shelf?: string
   consolidation?: typeof DEFAULT_CONSOLIDATION
   recall?: { preloadRulesTaboos?: boolean }
 }
@@ -69,9 +71,10 @@ function same(a: unknown, b: unknown): boolean {
 export type SettingsCardProps = {
   scope: SettingsScope<ConfigShape>
   loadModelCatalog: LoadConsolidationModelCatalog
+  loadShelfInventory: LoadShelfInventory
 } & PropsLocale<typeof NS>
 
-export function SettingsCard({ scope, loadModelCatalog, t }: SettingsCardProps) {
+export function SettingsCard({ scope, loadModelCatalog, loadShelfInventory, t }: SettingsCardProps) {
   const { snap, value } = useScopeValue(scope)
   const disabled = !snap.writable
   const base = useMemo(() => (snap.base ?? {}) as ConfigShape, [snap.base])
@@ -79,6 +82,7 @@ export function SettingsCard({ scope, loadModelCatalog, t }: SettingsCardProps) 
   const resolved: ConfigShape = useMemo(() => (value ?? base ?? {
     enabled: true,
     autoApprove: true,
+    shelf: DEFAULT_SHELF,
     consolidation: DEFAULT_CONSOLIDATION,
     recall: { preloadRulesTaboos: true },
   }), [value, base])
@@ -91,6 +95,10 @@ export function SettingsCard({ scope, loadModelCatalog, t }: SettingsCardProps) 
   const [catalogGroups, setCatalogGroups] = useState<Parameters<typeof consolidationModelCandidates>[0]>([])
   const [catalogPartial, setCatalogPartial] = useState(false)
   const catalogGeneration = useRef(0)
+  const [shelfStatus, setShelfStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
+  const [shelves, setShelves] = useState<ShelfInfo[]>([])
+  const [shelfListingError, setShelfListingError] = useState('')
+  const shelfGeneration = useRef(0)
 
   useEffect(() => {
     setDraft(resolved)
@@ -129,6 +137,35 @@ export function SettingsCard({ scope, loadModelCatalog, t }: SettingsCardProps) 
     void loadCatalog()
     return () => { catalogGeneration.current += 1 }
   }, [open, loadCatalog])
+
+  const loadShelves = useCallback(async () => {
+    const generation = ++shelfGeneration.current
+    setShelfStatus('loading')
+    try {
+      const inventory = await loadShelfInventory()
+      if (generation !== shelfGeneration.current) return
+      setShelves(inventory.shelves)
+      setShelfListingError(inventory.error)
+      setShelfStatus('ready')
+    } catch {
+      if (generation !== shelfGeneration.current) return
+      setShelfStatus('error')
+    }
+  }, [loadShelfInventory])
+
+  useEffect(() => {
+    if (!open) return
+    void loadShelves()
+    return () => { shelfGeneration.current += 1 }
+  }, [open, loadShelves])
+
+  const draftShelf = draft.shelf ?? DEFAULT_SHELF
+  const baseShelf = base.shelf ?? DEFAULT_SHELF
+  const choices = useMemo(
+    () => shelfChoices(shelves, [draftShelf, resolved.shelf ?? DEFAULT_SHELF, baseShelf]),
+    [shelves, draftShelf, resolved.shelf, baseShelf],
+  )
+  const chosen = choices.find(choice => choice.name === draftShelf)
 
   const candidates = useMemo(() => {
     const models = consolidation.models ?? []
@@ -172,6 +209,9 @@ export function SettingsCard({ scope, loadModelCatalog, t }: SettingsCardProps) 
       }
       if (!same(draft.autoApprove, resolved.autoApprove)) {
         tasks.push(scope.set('autoApprove', draft.autoApprove))
+      }
+      if (!same(draft.shelf, resolved.shelf)) {
+        tasks.push(scope.set('shelf', draft.shelf))
       }
       if (!same(draft.consolidation, resolved.consolidation)) {
         tasks.push(scope.set('consolidation', draft.consolidation))
@@ -309,6 +349,56 @@ export function SettingsCard({ scope, loadModelCatalog, t }: SettingsCardProps) 
               <span className={css.switchThumb} />
             </button>
             <p className={css.hint}>{t('autoApproveHint')}</p>
+          </div>
+
+          <div className={css.field}>
+            <div className={css.fieldHead}>
+              <label className={css.label} htmlFor="ham-shelf">{t('shelf')}</label>
+              {draftShelf !== baseShelf ? (
+                <button
+                  type="button"
+                  className={css.reset}
+                  disabled={disabled}
+                  onClick={() => setDraft((current) => ({ ...current, shelf: baseShelf }))}
+                >
+                  {t('reset')}
+                </button>
+              ) : null}
+            </div>
+            <select
+              id="ham-shelf"
+              className={css.select}
+              value={draftShelf}
+              disabled={disabled || saving}
+              onChange={(event) => {
+                const shelf = event.target.value
+                setDraft((current) => ({ ...current, shelf }))
+              }}
+            >
+              {choices.map(choice => (
+                <option key={choice.name} value={choice.name}>
+                  {choice.name}
+                  {choice.path !== '' ? ` — ${choice.path}` : ''}
+                  {!choice.listed
+                    ? t('shelfOptionStatus', { status: t('shelfNotListed') })
+                    : !choice.connected ? t('shelfOptionStatus', { status: t('shelfDisconnected') }) : ''}
+                </option>
+              ))}
+            </select>
+            {shelfStatus === 'loading' ? <p className={css.notice} role="status">{t('shelfLoading')}</p> : null}
+            {shelfStatus === 'error' ? (
+              <div className={css.catalogError} role="alert">
+                <span>{t('shelfLoadFailed')}</span>
+                <button type="button" disabled={saving} onClick={() => { void loadShelves() }}>{t('retry')}</button>
+              </div>
+            ) : null}
+            {shelfStatus === 'ready' && shelfListingError !== '' ? (
+              <p className={css.notice} role="status">{t('shelfListingFailed', { message: shelfListingError })}</p>
+            ) : null}
+            {shelfStatus === 'ready' && shelfListingError === '' && chosen !== undefined && (!chosen.listed || !chosen.connected) ? (
+              <p className={css.warning} role="status">{t(chosen.listed ? 'shelfDisconnectedWarning' : 'shelfNotListedWarning', { shelf: chosen.name })}</p>
+            ) : null}
+            <p className={css.hint}>{t('shelfHint')}</p>
           </div>
 
           <section className={css.group} aria-labelledby="ham-consolidation-title">

@@ -11,7 +11,8 @@
  *     ├─ recall      (inject agents)          — rules/taboos preload at session start
  *     ├─ housekeeping (inject sessionPersistence) — prune progress of vanished sessions
  *     ├─ auto-approve (inject approval, tools) — the agent's own bash `hypatia` calls
- *     └─ skills      (inject skills)          — hypatia-memory, hypatia, hypatia-dream
+ *     ├─ skills      (inject skills)          — hypatia-memory, hypatia, hypatia-dream
+ *     └─ shelf-inventory (inject settings)    — `hypatia list` for the settings card
  *
  * The last two fibers are here because this plugin REPLACES `dsh-hypatia`:
  * writing memory by asking the model to do it did not happen in practice, and
@@ -26,7 +27,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { absolutizeDates, blocksToText, eventDate, redactSecrets } from './content-policy.js'
-import { installConfig } from './config.js'
+import { INVENTORY_NAMESPACE, InventorySchema, installConfig } from './config.js'
 import { openState } from './state.js'
 import { EMPTY_PROGRESS, advanceProgress } from './progress.js'
 import { createStatus } from './status.js'
@@ -41,6 +42,7 @@ import { createPersistedSessions } from './persisted-session.js'
 import { createAutoApprove } from './auto-approve.js'
 import { registerSkills } from './skills.js'
 import { backfillConsolidation, pruneVanishedSessions, reconcileProgress } from './housekeeping.js'
+import { publishShelfInventory, shelfTable } from './shelf.js'
 
 export const name = 'dsh-hypatia-auto-memory'
 
@@ -77,11 +79,28 @@ function applyCollect(ctx, cordisConfig) {
       return
     }
 
-    const state = await openState(ctx)
+    const openedState = await openState(ctx)
     if (disposed) {
-      await state.domain.close().catch(() => {})
+      await openedState.domain.close().catch(() => {})
       return
     }
+
+    // Fixed for this run; see shelf.js. Every table read below goes through a
+    // view of this shelf's rows, so a switch never carries one shelf's
+    // watermarks or queued work into another.
+    const shelf = configHandle.get().shelf
+    const state = {
+      progress: shelfTable(openedState.progress, shelf),
+      tasks: shelfTable(openedState.tasks, shelf),
+    }
+    let announcedShelf = shelf
+    configHandle.onChange((value) => {
+      if (value.shelf === announcedShelf) return
+      announcedShelf = value.shelf
+      if (value.shelf !== shelf) {
+        status.info(`shelf changed to "${value.shelf}"; still writing to "${shelf}" until the profile reloads`)
+      }
+    })
 
     const queue = createQueue({
       tasks: state.tasks,
@@ -92,7 +111,27 @@ function applyCollect(ctx, cordisConfig) {
       get binaries() {
         return configHandle.get().binaries
       },
+      shelf,
       log: (message) => status.info(message),
+    })
+    status.info(`writing to shelf "${shelf}"`)
+
+    // What the settings card offers as choices. Also the one place a missing
+    // shelf is noticed before the first write fails on it.
+    const inventory = publishShelfInventory({
+      ctx,
+      cli,
+      status,
+      namespace: INVENTORY_NAMESPACE,
+      schema: InventorySchema,
+      label: name,
+    })
+    configHandle.onChange(() => { void inventory.refresh() })
+    void inventory.refresh().then(({ shelves, error }) => {
+      if (error !== '') return
+      const found = shelves.find((entry) => entry.name === shelf)
+      if (found === undefined) status.warn(`shelf "${shelf}" is not registered with hypatia; every write will fail until it is (hypatia connect <dir> --name ${shelf})`)
+      else if (!found.connected) status.warn(`shelf "${shelf}" is registered but not connected; writes will fail until it is`)
     })
     // Late-bound: adjudication needs a model route, which only the consolidate
     // fiber has. Without it the writer stores a unit with no relationship, which
@@ -333,7 +372,7 @@ function applyCollect(ctx, cordisConfig) {
       name: `${name}/recall`,
       inject: ['agents'],
       apply: (c) => {
-        createRecall({ ctx: c, cli, getConfig: configHandle.get, status, projectFor: collector.projectFor })
+        createRecall({ ctx: c, cli, shelf, getConfig: configHandle.get, status, projectFor: collector.projectFor })
       },
     })
 

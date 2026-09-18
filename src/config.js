@@ -18,6 +18,9 @@ export const SETTINGS_NAMESPACE = 'hypatia-auto-memory'
 export const DEFAULTS = {
   enabled: true,
   binaries: ['hypatia'],
+  // Where every entry this plugin writes — and every lookup it makes — goes.
+  // Read at startup, like `enabled`: see shelf.js for what a switch does.
+  shelf: 'default',
   // Approve the AGENT's own `hypatia …` bash calls (retrieval, explicit
   // remember/forget). This plugin's own writes never need it — they are argv
   // arrays on the subprocess service. Read at startup, like `enabled`.
@@ -93,6 +96,7 @@ const ConsolidationModelSchema = z.object({
 export const SettingsSchema = z.object({
   enabled: z.boolean().default(DEFAULTS.enabled),
   binaries: z.array(z.string()).default(DEFAULTS.binaries),
+  shelf: z.string().default(DEFAULTS.shelf),
   autoApprove: z.boolean().default(DEFAULTS.autoApprove),
   collector: z.object({
     enabled: z.boolean().default(DEFAULTS.collector.enabled),
@@ -135,11 +139,37 @@ export const SettingsSchema = z.object({
 })
 
 /**
+ * Read-only namespace publishing the shelves `hypatia list` reports, so the
+ * settings card can offer them as choices. The browser cannot run the CLI, and
+ * a settings descriptor is the one Host-owned value this plugin can put on the
+ * wire. Nothing is ever written to it: the Host re-registers it with a fresh
+ * composition layer (`base`) whenever the listing changes, and no card claims
+ * the namespace, so it renders nowhere.
+ */
+export const INVENTORY_NAMESPACE = 'hypatia-auto-memory-shelves'
+
+/** Schema of the shelf inventory; `error` is set when the listing failed. */
+export const InventorySchema = z.object({
+  shelves: z.array(z.object({
+    name: z.string(),
+    path: z.string(),
+    connected: z.boolean(),
+  })).default([]),
+  error: z.string().default(''),
+  listedAt: z.number().default(0),
+})
+
+/**
  * Validate the route list before its consumer sees it. An empty list is valid:
  * logging continues while consolidation stays idle until the user selects one
  * or more catalog routes.
  */
 function validateSettings(value) {
+  // One argv element to hypatia, and the name `hypatia list` prints: a blank
+  // or padded name would silently address a shelf that does not exist.
+  if (value.shelf === '' || /\s/.test(value.shelf)) {
+    throw new Error('hypatia-auto-memory: shelf must be a non-empty name without whitespace')
+  }
   const seen = new Set()
   for (const route of value.consolidation.models) {
     if (route.provider.trim() === '' || route.model.trim() === '') {

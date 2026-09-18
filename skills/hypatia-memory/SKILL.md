@@ -25,6 +25,14 @@ Do not do these by hand — you would only create duplicates:
 - **Session seed.** Project and global entries tagged `rule` or `taboo` are
   injected into your context at session start. Nothing else is pushed to you.
 
+## Which shelf
+
+The plugin writes to one hypatia shelf, chosen in its settings. When that is
+not `default`, the session seed says so: *"Memory lives on the hypatia shelf
+`<SHELF>`"*. Then add `--shelf <SHELF>` to **every** command below — reads and
+writes alike — or you will search a shelf the plugin never wrote to and store
+rules the seed will never load. When the seed names no shelf, leave the flag off.
+
 ## What you own: retrieval
 
 Rules and taboos are pushed because you cannot know to ask for them. Everything

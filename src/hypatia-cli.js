@@ -11,6 +11,8 @@
 
 import { homedir } from 'node:os'
 
+import { DEFAULT_SHELF, parseShelfList } from './shelf.js'
+
 /** Per-call ceiling for one hypatia CLI invocation. */
 const DEFAULT_TIMEOUT_MS = 30_000
 const GRACE_MS = 3000
@@ -63,10 +65,12 @@ export class HypatiaCliError extends Error {
  * Create the CLI runner bound to one subprocess service and config source.
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx - context injecting `subprocess`.
- * @param {{binaries: string[], timeoutMs?: number}} config
+ * @param {{binaries: string[], shelf?: string, timeoutMs?: number}} config -
+ *   `shelf` is where every call goes unless the call names another.
  */
 export function createHypatiaCli(ctx, config) {
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const shelfOf = () => config.shelf ?? DEFAULT_SHELF
 
   /**
    * Run one argv, collect bounded output, enforce the deadline.
@@ -198,7 +202,7 @@ export function createHypatiaCli(ctx, config) {
      * error: the CLI prints `Knowledge '<name>' not found.` with exit 0.
      * @returns {Promise<{found: true, name: string, content: any} | {found: false}>}
      */
-    async knowledgeGet(name, shelf = 'default') {
+    async knowledgeGet(name, shelf = shelfOf()) {
       const { stdout } = await runOk(['knowledge-get', name, '--shelf', shelf])
       const trimmed = stdout.trim()
       if (/^Knowledge '.*' not found\.$/.test(trimmed)) return { found: false }
@@ -211,7 +215,7 @@ export function createHypatiaCli(ctx, config) {
      * @returns {Promise<boolean>} true when this call created the entry.
      */
     async knowledgeCreate(name, entry) {
-      const argv = ['knowledge-create', name, '--shelf', entry.shelf ?? 'default']
+      const argv = ['knowledge-create', name, '--shelf', entry.shelf ?? shelfOf()]
       // Use the `--data=<value>` form: consolidated content routinely begins
       // with a markdown bullet (`- …`), and a space-separated `-d <value>`
       // makes clap parse the leading `-` as a new flag (exit 2).
@@ -228,7 +232,7 @@ export function createHypatiaCli(ctx, config) {
     async statementCreate(head, relation, tail, entry = {}) {
       const argv = [
         'statement-create', head, relation, tail,
-        '--shelf', entry.shelf ?? 'default',
+        '--shelf', entry.shelf ?? shelfOf(),
       ]
       // Same `--data=` rationale as knowledgeCreate: statement payloads can
       // start with `-` (markdown bullets) which a space-separated value would
@@ -244,7 +248,7 @@ export function createHypatiaCli(ctx, config) {
      * result prints `No results found.` on stdout with exit 0.
      * @returns {Promise<any[]>}
      */
-    async search(query, { catalog = 'knowledge', limit = 5, shelf = 'default' } = {}) {
+    async search(query, { catalog = 'knowledge', limit = 5, shelf = shelfOf() } = {}) {
       const { stdout } = await runOk(['search', query, '-c', catalog, '--limit', String(limit), '--shelf', shelf])
       if (isEmptyResult(stdout)) return []
       const parsed = parseJson(stdout, 'search')
@@ -256,7 +260,7 @@ export function createHypatiaCli(ctx, config) {
      * NOTE the flag is `-t/--target` (unlike keyword search's `-c`).
      * @returns {Promise<any[]>}
      */
-    async similar(query, { target = 'knowledge', limit = 5, shelf = 'default' } = {}) {
+    async similar(query, { target = 'knowledge', limit = 5, shelf = shelfOf() } = {}) {
       const { stdout } = await runOk(['similar', query, '-t', target, '--limit', String(limit), '--shelf', shelf])
       if (isEmptyResult(stdout)) return []
       const parsed = parseJson(stdout, 'similar')
@@ -267,7 +271,7 @@ export function createHypatiaCli(ctx, config) {
      * Raw JSE query (rules/taboos preload, not-summarized checks).
      * @returns {Promise<any[]>} result rows.
      */
-    async query(jse, { shelf = 'default' } = {}) {
+    async query(jse, { shelf = shelfOf() } = {}) {
       const { stdout } = await runOk(['query', jse, '--shelf', shelf])
       // An empty query prints the same sentinel as search; without this check it
       // surfaced as an "unparseable query output" error.
@@ -276,6 +280,15 @@ export function createHypatiaCli(ctx, config) {
       if (Array.isArray(parsed)) return parsed
       if (Array.isArray(parsed?.rows)) return parsed.rows
       return []
+    },
+
+    /**
+     * Registered shelves, as `hypatia list` reports them.
+     * @returns {Promise<{name: string, path: string, connected: boolean}[]>}
+     */
+    async listShelves() {
+      const { stdout } = await runOk(['list'])
+      return parseShelfList(stdout)
     },
   }
 }

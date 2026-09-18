@@ -163,7 +163,8 @@ agent/session-start ──▶ rules/taboos inject()
   before: the task waits.
 
 - **Recall** preloads project/global rules and taboos at session start. Nothing
-  else is pushed. Retrieval is the agent's job through the bundled skill, which
+  else is pushed, except one line naming the shelf when it is not `default`, so
+  the agent's own `hypatia` calls look where the plugin writes. Retrieval is the agent's job through the bundled skill, which
   is what `docs/memory-nolinear.md` prescribes for agents that hold context and
   can call tools; the previous per-turn injector also vetoed DSH's own runtime
   context section by returning from `agent/pre-step` without calling `next()`.
@@ -201,6 +202,7 @@ settings; all fields optional, defaults shown):
 hypatia-auto-memory:
   enabled: true
   binaries: [hypatia]
+  shelf: default                 # where every entry goes; read at startup (see below)
   autoApprove: true              # approve the AGENT's plain `hypatia …` bash calls
   collector:
     enabled: true
@@ -251,6 +253,37 @@ The cordis config block on the bundle row only carries skill packaging:
 `enabled` and `autoApprove` are read when the plugin starts, so changing either
 needs a profile reload; every other switch applies immediately.
 
+### Choosing the shelf
+
+`shelf` names the hypatia shelf every entry is written to and every lookup
+reads — logging, consolidation, the cascade, the rules/taboos preload, and the
+startup housekeeping. The settings card offers it as a dropdown of what
+`hypatia list` reports (refreshed about once a minute, and after every settings
+change), marking shelves that are registered but not connected.
+
+- **Takes effect after a profile reload**, like `enabled`. A running queue keeps
+  writing where it started; the log says so when the setting changes.
+- **Progress is kept per shelf.** Watermarks and queued tasks are stored per
+  shelf, so a newly chosen shelf starts every session from zero, and switching
+  back resumes exactly where that shelf left off — nothing is re-logged or
+  re-consolidated into a shelf that already has it. The cost is on the new
+  shelf: every live session is logged from its start there — and every other
+  session the next time it is active — and consolidated again, one model call
+  per span. Work queued for the other shelf waits, untouched, until it is
+  chosen again, and housekeeping (pruning vanished sessions, failed tasks) only
+  touches the current shelf's rows. `default` keeps the rows
+  written before this setting existed.
+- **The agent follows.** When the shelf is not `default`, the session seed tells
+  the agent to pass `--shelf <name>` to its own `hypatia` commands; the bundled
+  `hypatia-memory` skill says the same.
+- **A missing shelf is logged at startup**, not refused: writes to it fail and
+  retry like any other CLI failure until it is connected
+  (`hypatia connect <dir> --name <name>`).
+
+The listing reaches the browser as a second, read-only settings namespace,
+`hypatia-auto-memory-shelves`, which the Host re-registers whenever the listing
+changes. No card claims it, so it renders nowhere; nothing ever writes to it.
+
 ## Operations checklist
 
 1. After a turn ends, entries appear within seconds:
@@ -277,6 +310,8 @@ needs a profile reload; every other switch applies immediately.
 | Task in `deferred` state | Neither the live store nor persistence could supply its session. Not an error: it spends no attempts and runs as soon as one of them can. Normally storage answers immediately — the state persists only when `sessionPersistence` is absent from the composition, or its read failed (look for `could not be read` in the log) |
 | Task in `failed` state | A CLI or model error persisted after `maxAttempts`. Failed `log-message` records are pruned at the next startup, since the watermark re-derives their range; other kinds are kept for inspection — delete one to let the next trigger re-create it |
 | Watermark says logged, but the shelf has no entries | The shelf was reset or switched after logging. Handled at startup: `housekeeping.reconcileOnStartup` resets any row whose session has no `msg-*` left, and that session is re-logged — and re-consolidated — from the start on its next activity. A shelf query that fails leaves the row untouched. A session whose messages were all deleted on purpose is indistinguishable and is logged again; turn the switch off if that matters |
+| Every write fails right after changing `shelf` | The shelf is not registered or not connected — startup logs `shelf "<name>" is not registered`. Connect it (`hypatia connect <dir> --name <name>`) and reload the profile, or pick another |
+| The agent searches `default` while the plugin writes elsewhere | A disk copy of `hypatia-memory` (see below) replaced the bundled skill, or recall is disabled, so nothing told the agent which shelf to use |
 | Duplicate `msg-*` after weird manual edits | Delete the entry in hypatia and lower `lastLoggedSeq` for that session in the state domain — backfill recreates it once |
 | The agent's own `hypatia` write still asks for approval | `autoApprove: false` (needs a profile reload to change), the command pipes/redirects/chains outside quotes, or its first word is not one of `binaries` — only plain calls are answered, by design. Reads never reach approval at all, so nothing to fix there |
 | The agent got a memory protocol that tells it to log messages by hand | Another plugin registered `hypatia-memory` first (`dsh-hypatia` still in the profile), or a `hypatia-memory` exists on disk — typically `~/.agents/skills/hypatia-memory`, written by `hypatia skill install --agent codex`. Agent presets load disk skills in a layer nearer than plugins, so it wins in sessions even though the skill center may list this plugin. Remove the copy the startup warning names |
@@ -343,6 +378,7 @@ dsh-hypatia-auto-memory/
 ├── src/
 │   ├── index.js          # fiber composition (collect + optional children)
 │   ├── config.js         # settings namespace, defaults, live updates
+│   ├── shelf.js          # per-shelf table views, `hypatia list`, shelf inventory
 │   ├── state.js          # storageDomain spec + progress helpers
 │   ├── collector.js      # session/event filtering, ledger, backfill
 │   ├── content-policy.js # redaction, dates, caps, slugs (pure)
@@ -358,6 +394,7 @@ dsh-hypatia-auto-memory/
 │   └── client/           # browser settings card
 │       ├── index.tsx     # client plugin entry + slot registration
 │       ├── SettingsCard.tsx
+│       ├── shelves.ts    # shelf dropdown choices from the inventory namespace
 │       └── slot-contract.ts
 ├── lib/
 │   └── client.js         # built browser factory (commit this)

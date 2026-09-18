@@ -27,6 +27,11 @@
  * the agent cannot know it should ask for. The bundled `hypatia-memory` skill
  * carries the query recipes for everything else.
  *
+ * The seed also names the shelf when it is not hypatia's `default`: the agent's
+ * own `hypatia` calls would otherwise search one shelf while this plugin writes
+ * to another. That line is sent even with the preload switched off or nothing
+ * to preload, because it is not a preference — without it retrieval is wrong.
+ *
  * The seed carries `source: {kind: 'plugin', plugin, form: 'recall'}` so the
  * collector skips it — recall output must never be re-logged into memory.
  *
@@ -35,6 +40,7 @@
 
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { PLUGIN_NAME } from './consolidator.js'
+import { DEFAULT_SHELF } from './shelf.js'
 
 /**
  * JSE from the hypatia-memory protocol: entries tagged `tag` whose scopes carry
@@ -87,17 +93,16 @@ function renderRows(rows, cap) {
  * @param {{
  *   ctx: import('@deepseek-ai/cordis').Context,
  *   cli: ReturnType<import('./hypatia-cli.js').createHypatiaCli>,
+ *   shelf?: string,
  *   getConfig: () => any,
  *   status: import('./status.js').StatusLog,
  *   projectFor: (session: any) => Promise<string>,
  * }} deps
  */
-export function createRecall({ ctx, cli, getConfig, status, projectFor }) {
-  async function preloadRulesAndTaboos(agent) {
-    const config = getConfig()
-    if (config.recall.preloadRulesTaboos === false) return
+export function createRecall({ ctx, cli, shelf = DEFAULT_SHELF, getConfig, status, projectFor }) {
+  async function queryRulesAndTaboos(agent) {
     const project = await projectFor(agent.session)
-    const [rules, taboos] = await Promise.all([
+    return Promise.all([
       cli.query(scopedTagQuery('rule', project)).catch((error) => {
         status.warn(`rules preload query failed: ${String(error)}`)
         return []
@@ -107,11 +112,22 @@ export function createRecall({ ctx, cli, getConfig, status, projectFor }) {
         return []
       }),
     ])
+  }
+
+  async function preloadRulesAndTaboos(agent) {
+    const config = getConfig()
+    const preload = config.recall.preloadRulesTaboos !== false
+    const namesShelf = shelf !== DEFAULT_SHELF
+    if (!preload && !namesShelf) return
+    const [rules, taboos] = preload ? await queryRulesAndTaboos(agent) : [[], []]
     const rulesText = renderRows(rules, 400)
     const taboosText = renderRows(taboos, 400)
-    if (rulesText === '' && taboosText === '') return
+    if (rulesText === '' && taboosText === '' && !namesShelf) return
 
     const sections = ['## Long-term memory (auto-loaded from hypatia)', '']
+    if (namesShelf) {
+      sections.push(`Memory lives on the hypatia shelf \`${shelf}\`: add \`--shelf ${shelf}\` to every \`hypatia\` command you run.`, '')
+    }
     if (rulesText !== '') sections.push('### Rules', rulesText, '')
     if (taboosText !== '') sections.push('### Taboos', taboosText, '')
     agent.inject(createUserMessage({
