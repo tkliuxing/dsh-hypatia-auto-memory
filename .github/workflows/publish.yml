@@ -1,0 +1,62 @@
+# Publishes to npm through trusted publishing (OIDC). The npm side is configured
+# for this repository against the workflow file `publish.yml` and the GitHub
+# environment `publishing`, so neither name may change without updating npm too.
+# No npm token is involved, and npm mints the provenance attestation itself.
+name: publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dist_tag:
+        description: npm dist-tag to publish under
+        type: choice
+        default: latest
+        options:
+          - latest
+          - next
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: publishing
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing needs npm >= 11.5.1; the runner's bundled npm can lag.
+      - name: Ensure an npm that can exchange OIDC tokens
+        run: npm install -g npm@latest
+
+      - name: Reject a tag that disagrees with package.json
+        if: github.event_name == 'push'
+        run: |
+          tagged="${GITHUB_REF_NAME#v}"
+          declared="$(node -p 'require("./package.json").version')"
+          if [ "$tagged" != "$declared" ]; then
+            echo "tag $GITHUB_REF_NAME says $tagged, package.json says $declared" >&2
+            exit 1
+          fi
+
+      # No lockfile in the repo, so this installs rather than `npm ci`.
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      # `prepublishOnly` runs typecheck, tests and the client bundle build, which
+      # keeps this gate identical to the one a local `npm publish` goes through.
+      - name: Publish
+        env:
+          DIST_TAG: ${{ inputs.dist_tag || 'latest' }}
+        run: npm publish --tag "$DIST_TAG"
