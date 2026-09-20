@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -162,19 +162,4 @@ test('the package ships all three skills', async () => {
   const skills = fakeSkills()
   const names = await registerSkills({ skills }, join(PACKAGE_ROOT, 'skills'), quiet(), 'ham')
   assert.deepEqual(names.sort(), ['hypatia', 'hypatia-dream', 'hypatia-memory'])
-})
-
-test('the two carried copies still match the repository originals', () => {
-  // They are copies of ../skills, kept because this plugin replaces
-  // dsh-hypatia, which used to supply them. `npm run sync-skills` refreshes
-  // them; this test is what notices when someone forgets.
-  const canonical = join(dirname(PACKAGE_ROOT), 'skills')
-  if (existsSync(canonical) === false) return // published package, no repo around it
-  for (const name of ['hypatia', 'hypatia-dream']) {
-    assert.equal(
-      readFileSync(join(PACKAGE_ROOT, 'skills', name, 'SKILL.md'), 'utf8'),
-      readFileSync(join(canonical, name, 'SKILL.md'), 'utf8'),
-      `${name} drifted from ../skills — run npm run sync-skills`,
-    )
-  }
 })

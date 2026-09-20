@@ -6,13 +6,13 @@
  *   hypatia-memory  this plugin's own variant — the automatic layer does the
  *                   writing, so the skill is about retrieval and explicit
  *                   remember/forget, not about logging messages by hand.
- *   hypatia         verbatim copy of the repository's CLI reference.
- *   hypatia-dream   verbatim copy of the consolidation pass.
+ *   hypatia         verbatim copy of hypatia's CLI reference.
+ *   hypatia-dream   verbatim copy of hypatia's consolidation pass.
  *
  * The last two used to arrive with `dsh-hypatia`. This plugin replaces it, so
  * it carries them itself — otherwise removing `dsh-hypatia` from a profile
- * would take the CLI reference away with it. `npm run sync-skills` refreshes
- * both copies from the repository root.
+ * would take the CLI reference away with it. Both are vendored by hand from
+ * the hypatia repository's `skills/`; nothing refreshes them automatically.
  *
  * @module dsh-hypatia-auto-memory/skills
  */

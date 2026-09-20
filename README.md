@@ -28,7 +28,7 @@ works through the CLI instead, with one warning at the first call.
 
 ```bash
 # from a local checkout (development)
-dsh plugin --profile web add link:/path/to/hypatia/dsh-hypatia-auto-memory
+dsh plugin --profile web add link:/path/to/dsh-hypatia-auto-memory
 
 # registry install once published
 dsh plugin --profile web add dsh-hypatia-auto-memory
@@ -222,7 +222,7 @@ agent/session-start ──▶ rules/taboos inject()
 
 - **Skills** are bundled: `hypatia-memory` in this plugin's variant (the
   automatic layer writes, the agent retrieves), plus byte-identical copies of
-  the repository's `hypatia` CLI reference and `hypatia-dream`, carried because
+  hypatia's `hypatia` CLI reference and `hypatia-dream`, carried because
   removing `dsh-hypatia` would otherwise take them with it. Another plugin's
   registration of the same name is left alone and reported, since DSH keeps the
   first runtime registration. A copy on disk is registered over but still wins
@@ -397,11 +397,11 @@ Deliberate, and worth knowing before you rely on them:
   linked leave the tier's unarchived set, so the retry archives a different
   batch. Everything is still archived exactly once; the grouping is just not the
   one the first attempt intended.
-- **Two of the three bundled skills are copies.** `hypatia` and `hypatia-dream`
-  are byte-identical copies of the repository's `skills/`, because a published
-  package cannot reach outside itself. `npm run sync-skills` refreshes them, and
-  `test/skills.test.mjs` fails when they drift — but only in a repository
-  checkout, where the originals are there to compare against.
+- **Two of the three bundled skills are vendored copies.** `hypatia` and
+  `hypatia-dream` are byte-identical copies of the [hypatia
+  repository](https://github.com/tkliuxing/hypatia)'s `skills/`, because a
+  published package cannot reach outside itself. Nothing refreshes them: when
+  the originals change upstream, copy them in by hand.
 - **`enabled: false` at the top level is read at plugin startup**; toggling it
   live requires a profile reload, while the per-feature switches apply
   immediately.
@@ -442,10 +442,9 @@ dsh-hypatia-auto-memory/
 │   └── client.js         # built browser factory (commit this)
 ├── skills/
 │   ├── hypatia-memory/   # this plugin's variant (retrieval is the agent's)
-│   ├── hypatia/          # copy of ../skills/hypatia
-│   └── hypatia-dream/    # copy of ../skills/hypatia-dream
+│   ├── hypatia/          # vendored from hypatia's skills/
+│   └── hypatia-dream/    # vendored from hypatia's skills/
 ├── scripts/
-│   ├── sync-skills.mjs   # refresh both copies from the repository root
 │   └── it-shelf.sh       # throwaway shelf for manual CLI probing
 ├── test/                 # node:test units (npm test)
 │   └── integration/      # contracts against a real hypatia (npm run test:integration)
