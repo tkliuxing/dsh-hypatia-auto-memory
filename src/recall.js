@@ -92,7 +92,7 @@ function renderRows(rows, cap) {
 /**
  * @param {{
  *   ctx: import('@deepseek-ai/cordis').Context,
- *   cli: ReturnType<import('./hypatia-cli.js').createHypatiaCli>,
+ *   cli: ReturnType<import('./hypatia-client.js').createHypatiaClient>,
  *   shelf?: string,
  *   getConfig: () => any,
  *   status: import('./status.js').StatusLog,

@@ -256,7 +256,7 @@ export function parseConsolidationOutput(raw, maxWorkUnits) {
  *   progress: any,
  *   sessions: any,
  *   llm: any,
- *   cli: ReturnType<import('./hypatia-cli.js').createHypatiaCli>,
+ *   cli: ReturnType<import('./hypatia-client.js').createHypatiaClient>,
  *   writer: ReturnType<import('./writer.js').createWriter>,
  *   getConfig: () => any,
  *   status: import('./status.js').StatusLog,

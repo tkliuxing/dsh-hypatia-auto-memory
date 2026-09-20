@@ -196,6 +196,50 @@ export function sanitizeSlug(name, cap = 60) {
 }
 
 /**
+ * Project scope of a session whose directory name is empty — one at `/`. No
+ * directory name contains a slash, so it can never be some real project's.
+ */
+export const ROOT_PROJECT = '/'
+
+/** Unicode White_Space, which Rust's `str::trim` strips — and so hypatia, from each scope. */
+const HYPATIA_TRIM = /^[\t-\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t-\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g
+
+/**
+ * Trim `text` as hypatia trims a scope or tag. `String.prototype.trim` is not
+ * the same set: it also strips U+FEFF, which hypatia keeps, and keeps U+0085,
+ * which hypatia strips.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function trimLikeHypatia(text) {
+  return text.replace(HYPATIA_TRIM, '')
+}
+
+/**
+ * The project scope for a directory name, in a form hypatia stores exactly
+ * as queried.
+ *
+ * Every entry is written with `scopes: [project]` and found again with
+ * `["$contains", "scopes", project]`, an exact array-membership test. hypatia
+ * splits a written scope list on commas and trims each item, and stores `""`
+ * as no scope at all, so these names were stored as something the name's own
+ * queries miss: `a,b` as `["a", "b"]` (found under `a` and `b` instead),
+ * `foo,` as `["foo", ""]` (global as well), ` padded ` as `padded`, and the
+ * empty name of `/` as no scope at all. Messages were still summarized — consolidation reads the session log —
+ * but the cascade above the first tier and recall filter by scope and passed
+ * them by. Any other name comes back unchanged, so no scope already in use
+ * moves.
+ *
+ * @param {string} name
+ * @returns {string}
+ */
+export function projectScope(name) {
+  const scope = trimLikeHypatia(String(name ?? '').replaceAll(',', '_'))
+  return scope === '' ? ROOT_PROJECT : scope
+}
+
+/**
  * Cap assistant message text at `maxChars`, leaving an explicit truncation
  * marker so later readers know the entry is partial.
  *

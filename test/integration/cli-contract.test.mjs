@@ -22,6 +22,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { projectScope } from '../../src/content-policy.js'
+
 const hypatiaAvailable = spawnSync('hypatia', ['--version'], { encoding: 'utf8' }).status === 0
 const options = hypatiaAvailable
   ? {}
@@ -60,6 +62,18 @@ test('hypatia CLI contracts the plugin parses', options, async (t) => {
     assert.deepEqual(contentOf('p-plain').scopes, ['proj'])
     assert.deepEqual(contentOf('p-trail').scopes, ['proj', ''])
     assert.equal(contentOf('p-empty').scopes, null, 'empty --scopes drops the field entirely')
+  })
+
+  await t.test('the scopes projectScope produces are stored and found as given', () => {
+    // `projectScope` (content-policy.js) maps the names hypatia would rewrite —
+    // `/`'s empty basename, commas — onto these. They are only safe if hypatia
+    // stores each as one scope that exact-membership queries match.
+    for (const [name, scope] of [['p-root', projectScope('')], ['p-comma', projectScope('a,b')]]) {
+      hyp(['knowledge-create', name, '--data=x', '--tags', 'message', '--scopes', scope])
+      assert.deepEqual(contentOf(name).scopes, [scope])
+      const rows = JSON.parse(hyp(['query', JSON.stringify({ '$not-summaried': ['message', ['$contains', 'scopes', scope]], limit: 4 })]).stdout)
+      assert.deepEqual(rows.map((r) => r.name), [name])
+    }
   })
 
   await t.test('duplicate writes are rejected with the text hypatia-cli.js keys on, or are no-ops', () => {

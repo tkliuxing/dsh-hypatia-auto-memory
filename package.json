@@ -22,7 +22,7 @@
     "sync-skills": "node scripts/sync-skills.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.mjs",
-    "test:integration": "node --test test/integration/*.test.mjs",
+    "test:integration": "node --test --test-concurrency=1 test/integration/*.test.mjs",
     "watch": "tsdown --watch"
   },
   "dsh": {

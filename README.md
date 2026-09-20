@@ -13,15 +13,18 @@ Writing is automatic; **reading is the agent's job**, through the bundled
 agent, which in practice did not happen: in the deployment this one was written
 for, the model loaded the protocol and still issued a `hypatia` command in one
 recorded session out of fifteen — the one where it was asked to directly. Here
-the protocol is driven from **DSH native events**, and the `hypatia` CLI is
-called through the subprocess service with argv arrays — no shell, no sandbox
+the protocol is driven from **DSH native events**, and the plugin talks to
+hypatia over its own `hypatia mcp` process on the subprocess service (the CLI,
+with argv arrays, as fallback) — no shell, no tool call, no sandbox
 escalation, no approval prompt. What is still worth having from `dsh-hypatia`
 ships here: auto-approval for the agent's own bash `hypatia` calls, and its
 `hypatia` / `hypatia-dream` skills. Install one or the other, not both.
 
 ## Install
 
-Prerequisite: `hypatia` CLI on PATH (or add its basename to `binaries`).
+Prerequisite: `hypatia` CLI on PATH (or add its basename to `binaries`). A
+build with the `mcp` subcommand (hypatia #20) is used over MCP; an older one
+works through the CLI instead, with one warning at the first call.
 
 ```bash
 # from a local checkout (development)
@@ -78,6 +81,39 @@ session/disposed ──▶ final flush + consolidation, thresholds waived (a ses
                      startup consolidation backfill instead)
 agent/session-start ──▶ rules/taboos inject()
 ```
+
+- **Transport** is a private `hypatia mcp` process: JSON-RPC over stdio on the
+  subprocess service, one request at a time, which is how that server handles
+  them anyway. It is not a `dsh-mcp-client` entry, so the model never sees
+  these tools and the plugin's calls meet no tool policy, hook or approval.
+  Over the CLI, every call was a process that opened the shelf; here a burst of
+  writes shares one. Content travels as JSON rather than one argv element, so
+  it is no longer cut at 96 KiB to fit a command line. Tags and scopes are
+  split on commas as the CLI splits them, so an entry is stored the same over
+  either transport.
+
+  One process means one call at a time, where the CLI ran as many as
+  `queue.concurrency` allowed. A call waits behind the one in flight — at
+  worst a `similar` reloading the embedding model, or a write paying overdue
+  embedding debt — and that includes the rules/taboos preload at session
+  start.
+
+  The process starts on the first call and is closed after 60 s without one.
+  `hypatia mcp` keeps the embedding model's allocations after a semantic call
+  (hundreds of MB), and reads the shelf registry once, at start. For the same
+  reason a `shelf '<name>' is not connected` error restarts it, so a shelf
+  connected meanwhile is found on the retry, and the shelf listing for the
+  settings card always comes from `hypatia list`. A call that overruns its
+  30 s deadline kills the process, as the CLI path kills a command; the next
+  call starts another.
+
+  `transport: cli` restores one CLI command per call. A binary that serves no
+  usable MCP — no `mcp` subcommand, a tool this plugin calls missing, or an
+  error in answer to the handshake — makes the plugin use the CLI until the
+  profile reloads. Any other failure to start
+  fails only that call, and the next one tries MCP again: a binary that cannot
+  be started at all would fail the CLI too, and a start that timed out or
+  crashed may not do so twice.
 
 - **Collector** records human `user/message` and `assistant/message`, redacts
   secrets, rewrites relative dates against the time the message was sent, caps
@@ -202,6 +238,7 @@ settings; all fields optional, defaults shown):
 hypatia-auto-memory:
   enabled: true
   binaries: [hypatia]
+  transport: mcp                 # or cli; a binary without `mcp` falls back to cli
   shelf: default                 # where every entry goes; read at startup (see below)
   autoApprove: true              # approve the AGENT's plain `hypatia …` bash calls
   collector:
@@ -277,8 +314,9 @@ change), marking shelves that are registered but not connected.
   the agent to pass `--shelf <name>` to its own `hypatia` commands; the bundled
   `hypatia-memory` skill says the same.
 - **A missing shelf is logged at startup**, not refused: writes to it fail and
-  retry like any other CLI failure until it is connected
-  (`hypatia connect <dir> --name <name>`).
+  retry like any other hypatia failure until it is connected
+  (`hypatia connect <dir> --name <name>`). Over MCP, that failure restarts the
+  server, so the retry after a `connect` reaches the shelf.
 
 The listing reaches the browser as a second, read-only settings namespace,
 `hypatia-auto-memory-shelves`, which the Host re-registers whenever the listing
@@ -308,15 +346,17 @@ changes. No card claims it, so it renders nowhere; nothing ever writes to it.
 | Summaries but no `sum2-*` | Fewer than `cascade.batchSize` unarchived tier-1 summaries in that project yet |
 | Work units have no relationships | No embedding model on the shelf (`similar` fails), or every candidate was beyond `dedupMaxDistance` |
 | Task in `deferred` state | Neither the live store nor persistence could supply its session. Not an error: it spends no attempts and runs as soon as one of them can. Normally storage answers immediately — the state persists only when `sessionPersistence` is absent from the composition, or its read failed (look for `could not be read` in the log) |
-| Task in `failed` state | A CLI or model error persisted after `maxAttempts`. Failed `log-message` records are pruned at the next startup, since the watermark re-derives their range; other kinds are kept for inspection — delete one to let the next trigger re-create it |
+| Task in `failed` state | A hypatia or model error persisted after `maxAttempts`. Failed `log-message` records are pruned at the next startup, since the watermark re-derives their range; other kinds are kept for inspection — delete one to let the next trigger re-create it |
 | Watermark says logged, but the shelf has no entries | The shelf was reset or switched after logging. Handled at startup: `housekeeping.reconcileOnStartup` resets any row whose session has no `msg-*` left, and that session is re-logged — and re-consolidated — from the start on its next activity. A shelf query that fails leaves the row untouched. A session whose messages were all deleted on purpose is indistinguishable and is logged again; turn the switch off if that matters |
+| Warning `hypatia mcp unavailable: …; using the hypatia CLI until the profile reloads` | The binary predates `hypatia mcp` (the message quotes its `unrecognized subcommand`), lacks a tool the plugin calls, or answered the handshake with an error. Everything keeps working over the CLI; upgrade hypatia and reload the profile to use MCP |
+| Every call fails with `hypatia mcp exited …` or `timed out` | The binary starts but its MCP server does not come up — a wrapper script in `binaries` that changes clap's exit code or wording is not recognised as an old binary. Set `transport: cli` |
 | Every write fails right after changing `shelf` | The shelf is not registered or not connected — startup logs `shelf "<name>" is not registered`. Connect it (`hypatia connect <dir> --name <name>`) and reload the profile, or pick another |
 | The agent searches `default` while the plugin writes elsewhere | A disk copy of `hypatia-memory` (see below) replaced the bundled skill, or recall is disabled, so nothing told the agent which shelf to use |
 | Duplicate `msg-*` after weird manual edits | Delete the entry in hypatia and lower `lastLoggedSeq` for that session in the state domain — backfill recreates it once |
 | The agent's own `hypatia` write still asks for approval | `autoApprove: false` (needs a profile reload to change), the command pipes/redirects/chains outside quotes, or its first word is not one of `binaries` — only plain calls are answered, by design. Reads never reach approval at all, so nothing to fix there |
 | The agent got a memory protocol that tells it to log messages by hand | Another plugin registered `hypatia-memory` first (`dsh-hypatia` still in the profile), or a `hypatia-memory` exists on disk — typically `~/.agents/skills/hypatia-memory`, written by `hypatia skill install --agent codex`. Agent presets load disk skills in a layer nearer than plugins, so it wins in sessions even though the skill center may list this plugin. Remove the copy the startup warning names |
 | Startup warnings never appear in the terminal | `dsh web` mounts no log exporter, so plugin log lines of any level go nowhere; the console exporter's default threshold would also drop warnings (warn is level 2, above info's 1). Mount a logger such as `dsh-logbook` or `dsh-boot-doctor` temporarily to read them |
-| Project scope looks wrong | Scope = git-root basename of the session cwd (falls back to basename); two same-named checkouts share a scope by design |
+| Project scope looks wrong | Scope = basename of the session cwd's git top level (`git rev-parse --show-toplevel`), or of the cwd itself when git finds no work tree or cannot answer (not installed, a repo it refuses as unsafe). A `rev-parse` slower than 3 s leaves that one session on the cwd's own name. Two same-named checkouts share a scope by design; a linked worktree is scoped by its own directory, not the main checkout's; git resolves symlinks, so a checkout opened through a link named differently from its target gets the target's name. A name hypatia would rewrite is normalized first: a session at `/` is scoped `/`, commas become `_`, surrounding whitespace goes. Entries written before these fixes stay where they were stored: a subdirectory session's under that directory's name (`repo/src` wrote under `src` — the git root was never read), a session at `/` with no scope, `a,b` under both `a` and `b`, `foo,` under `foo` and global. Padded names were stored trimmed, which is what the query now asks for. Nothing migrates them; `knowledge-update --scopes` moves one entry and keeps its `created_at` |
 
 ## Known limitations
 
@@ -383,6 +423,8 @@ dsh-hypatia-auto-memory/
 │   ├── collector.js      # session/event filtering, ledger, backfill
 │   ├── content-policy.js # redaction, dates, caps, slugs (pure)
 │   ├── queue.js          # durable per-session queue with retry/dispose
+│   ├── hypatia-client.js # transport switch: MCP, CLI fallback
+│   ├── hypatia-mcp.js    # private `hypatia mcp` connection + result mapping
 │   ├── hypatia-cli.js    # argv-only subprocess wrapper
 │   ├── writer.js         # idempotent get-before-create writes
 │   ├── consolidator.js   # thresholds, prompt, llm.stream, validation

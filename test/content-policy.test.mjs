@@ -10,6 +10,8 @@ import {
   oneLineError,
   redactSecrets,
   sanitizeSlug,
+  projectScope,
+  trimLikeHypatia,
 } from '../src/content-policy.js'
 
 const NOW = new Date('2025-09-09T12:00:00')
@@ -115,4 +117,25 @@ test('blocksToText flattens content blocks', () => {
   assert.ok(out.includes('[image]'))
   assert.ok(out.includes('[thinking: hmm]'))
   assert.ok(out.includes('[other]'))
+})
+
+const NEL = String.fromCharCode(0x85)
+const BOM = String.fromCharCode(0xfeff)
+
+test('trimLikeHypatia strips what Rust str::trim strips, not what String.trim does', () => {
+  // hypatia trims each scope with Rust's `str::trim` (Unicode White_Space).
+  assert.equal(trimLikeHypatia(`${NEL}nel${NEL}`), 'nel', 'U+0085 is White_Space; String.trim keeps it')
+  assert.equal(trimLikeHypatia(`${BOM}bom`), `${BOM}bom`, 'U+FEFF is not White_Space; String.trim strips it')
+  const wide = [0x3000, 0x2029, 0xa0, 0x1680, 0x2000, 0x200a, 0x202f, 0x205f].map((c) => String.fromCharCode(c)).join('')
+  assert.equal(trimLikeHypatia(`${wide} \t项目\n${wide}`), '项目')
+  assert.equal(trimLikeHypatia('a b'), 'a b', 'inner whitespace stays')
+})
+
+test('projectScope keeps a name hypatia already stored as given, even at the Unicode edges', () => {
+  // A BOM-led name was written and queried consistently before; String.trim
+  // would have moved it and stranded what it wrote.
+  assert.equal(projectScope(`${BOM}bom`), `${BOM}bom`)
+  // A NEL-ended name was stored trimmed, so its queries must be trimmed too.
+  assert.equal(projectScope(`nel${NEL}`), 'nel')
+  assert.equal(projectScope(String.fromCharCode(0xa0)), '/', 'whitespace only is the root name')
 })

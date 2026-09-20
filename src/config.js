@@ -18,12 +18,16 @@ export const SETTINGS_NAMESPACE = 'hypatia-auto-memory'
 export const DEFAULTS = {
   enabled: true,
   binaries: ['hypatia'],
+  // How the plugin itself talks to hypatia: a private `hypatia mcp` process,
+  // or one CLI command per call. A binary without `mcp` falls back to the CLI
+  // on its own (see hypatia-client.js). Applies from the next call.
+  transport: 'mcp',
   // Where every entry this plugin writes — and every lookup it makes — goes.
   // Read at startup, like `enabled`: see shelf.js for what a switch does.
   shelf: 'default',
   // Approve the AGENT's own `hypatia …` bash calls (retrieval, explicit
-  // remember/forget). This plugin's own writes never need it — they are argv
-  // arrays on the subprocess service. Read at startup, like `enabled`.
+  // remember/forget). This plugin's own writes never need it — they go over
+  // its own connection, never through a tool call. Read at startup, like `enabled`.
   autoApprove: true,
   collector: {
     enabled: true,
@@ -96,6 +100,7 @@ const ConsolidationModelSchema = z.object({
 export const SettingsSchema = z.object({
   enabled: z.boolean().default(DEFAULTS.enabled),
   binaries: z.array(z.string()).default(DEFAULTS.binaries),
+  transport: z.union(['mcp', 'cli']).default(DEFAULTS.transport),
   shelf: z.string().default(DEFAULTS.shelf),
   autoApprove: z.boolean().default(DEFAULTS.autoApprove),
   collector: z.object({

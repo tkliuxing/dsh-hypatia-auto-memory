@@ -76,7 +76,10 @@ hypatia query '["$knowledge", ["$contains","tags","rule"],
 hypatia query '["$statement", ["$k-hop", "<entry-name>", "$*", 2]]'
 ```
 
-`<PROJECT>` is the git-root basename of the workspace.
+`<PROJECT>` is the basename of the workspace's git root (of the workspace
+itself outside git), written as the plugin writes it: commas become `_`,
+surrounding whitespace is dropped, and the filesystem root is `/`. Written raw,
+a name with a comma would be split into two scopes.
 
 ### Always exclude the operational layer
 
@@ -111,9 +114,26 @@ hypatia knowledge-create "<short-kebab-name>" \
   `--scopes "<PROJECT>,"` — with a *trailing comma* — also marks it global.
   `--scopes ""` writes no scope at all, which is not the same as global and will
   not be found by the session seed.
-- There is **no `knowledge-update`**. Check with `knowledge-get <name>` first,
-  then create or leave it alone. Changing an entry means delete + create, which
-  loses its creation time and embedding, so avoid it unless the user asks.
+- Check with `knowledge-get <name>` first. A new name gets `knowledge-create`.
+  An existing entry the user wants reworded, retagged or rescoped gets
+  `knowledge-update`, **never** delete + create:
+
+  ```bash
+  hypatia knowledge-update "<exact-name>" --data="<the corrected fact>"
+  ```
+
+  Only the fields you pass change. The entry keeps its `created_at`, and its
+  vector is regenerated on the next flush. An update that changes nothing
+  prints `Knowledge unchanged: <name>` and writes nothing. Updating a missing
+  entry exits 1.
+- Pass only the fields you mean to change. `--scopes` **replaces** the stored
+  scopes, with the syntax above: leave off the trailing comma and a global rule
+  drops out of the session seed. `--tags ""` clears every tag, and an entry
+  that is no longer tagged `rule` or `taboo` is not seeded either.
+- An update is not how you record a contradiction; that is `supersedes`, below.
+- A hypatia older than #20 has no `knowledge-update` and exits 2 with
+  `unrecognized subcommand`. Then leave the entry alone unless the user asks:
+  delete + create loses its creation time.
 - Creating a name that already exists exits 1 with `UNIQUE constraint failed`.
   That is a collision, not a crash.
 

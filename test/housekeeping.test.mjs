@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { backfillConsolidation, pruneVanishedSessions, reconcileProgress } from '../src/housekeeping.js'
+import { backfillConsolidation, normalizeTaskProjects, pruneVanishedSessions, reconcileProgress } from '../src/housekeeping.js'
 import { EMPTY_PROGRESS } from '../src/progress.js'
 
 function progressTable(seed) {
@@ -155,4 +155,67 @@ test('backfill ignores a fully consolidated session and one DSH no longer lists'
 
   assert.deepEqual(result.enqueued, [], 'no tail, and no session to resolve a scope from')
   assert.deepEqual(queue.specs, [])
+})
+
+/* ---------------------------------------------------------------------------- */
+/* Queued tasks' projects                                                       */
+/* ---------------------------------------------------------------------------- */
+
+function taskTable(seed) {
+  const map = new Map(Object.entries(seed))
+  const updated = []
+  return {
+    map,
+    updated,
+    entries: () => map.entries(),
+    update: async (key, fn) => {
+      updated.push(key)
+      map.set(key, fn(map.get(key)))
+    },
+  }
+}
+
+const task = (project, overrides = {}) => ({
+  kind: 'log-message', sessionId: 's', fromSeq: 0, toSeq: 10, project, status: 'pending', attempts: 0, error: null, ...overrides,
+})
+
+test('queued tasks get the scope their project now resolves to', async () => {
+  const tasks = taskTable({
+    'log-message:root': task(''),
+    'consolidate:comma': task('a,b', { kind: 'consolidate', status: 'running', attempts: 2 }),
+    'cascade:fine': task('proj', { kind: 'cascade' }),
+  })
+  const status = quiet()
+  assert.equal(await normalizeTaskProjects({ tasks, status }), 2)
+  assert.equal(tasks.map.get('log-message:root').project, '/')
+  assert.deepEqual(tasks.map.get('consolidate:comma'), task('a_b', { kind: 'consolidate', status: 'running', attempts: 2 }), 'nothing but the project changes')
+  assert.deepEqual(tasks.updated.sort(), ['consolidate:comma', 'log-message:root'], 'a task already in scope form is not written')
+  assert.match(status.lines[0][1], /2 queued task/)
+})
+
+test('nothing to rewrite writes nothing and says nothing', async () => {
+  const tasks = taskTable({ 'log-message:a': task('proj') })
+  const status = quiet()
+  assert.equal(await normalizeTaskProjects({ tasks, status }), 0)
+  assert.deepEqual(tasks.updated, [])
+  assert.deepEqual(status.lines, [])
+})
+
+test('a failed task is left as it stands: it never runs again', async () => {
+  const tasks = taskTable({ 'log-message:gone': task('', { status: 'failed', error: 'x' }) })
+  assert.equal(await normalizeTaskProjects({ tasks, status: quiet() }), 0)
+  assert.equal(tasks.map.get('log-message:gone').project, '')
+})
+
+test('one task that cannot be rewritten is reported, and the rest still are', async () => {
+  const tasks = taskTable({ 'log-message:bad': task(''), 'log-message:good': task('a,b') })
+  const update = tasks.update
+  tasks.update = async (key, fn) => {
+    if (key === 'log-message:bad') throw new Error('storage refused')
+    return update(key, fn)
+  }
+  const status = quiet()
+  assert.equal(await normalizeTaskProjects({ tasks, status }), 1)
+  assert.equal(tasks.map.get('log-message:good').project, 'a_b')
+  assert.ok(status.lines.some(([level, line]) => level === 'warn' && /log-message:bad.*storage refused/.test(line)))
 })

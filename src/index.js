@@ -2,9 +2,9 @@
  * dsh-hypatia-auto-memory — event-driven Hypatia memory for DSH.
  *
  * One host plugin whose collect fiber owns the durable core (state domain,
- * queue, CLI, writer, collector); optional child fibers attach the rest, so a
- * deployment missing `llm` still logs conversations and a deployment missing
- * `skills` still remembers:
+ * queue, hypatia client, writer, collector); optional child fibers attach the
+ * rest, so a deployment missing `llm` still logs conversations and a
+ * deployment missing `skills` still remembers:
  *
  *   collect  (inject sessions, storageDomain, subprocess, settings)
  *     ├─ consolidate (inject llm, sessions)   — span summaries, cascade, work units
@@ -31,7 +31,7 @@ import { INVENTORY_NAMESPACE, InventorySchema, installConfig } from './config.js
 import { openState } from './state.js'
 import { EMPTY_PROGRESS, advanceProgress } from './progress.js'
 import { createStatus } from './status.js'
-import { createHypatiaCli } from './hypatia-cli.js'
+import { createHypatiaClient } from './hypatia-client.js'
 import { createWriter } from './writer.js'
 import { TaskDeferredError, createQueue } from './queue.js'
 import { countLoggableMessages, createCollector, formatSpan } from './collector.js'
@@ -41,7 +41,7 @@ import { createRecall } from './recall.js'
 import { createPersistedSessions } from './persisted-session.js'
 import { createAutoApprove } from './auto-approve.js'
 import { registerSkills } from './skills.js'
-import { backfillConsolidation, pruneVanishedSessions, reconcileProgress } from './housekeeping.js'
+import { backfillConsolidation, normalizeTaskProjects, pruneVanishedSessions, reconcileProgress } from './housekeeping.js'
 import { publishShelfInventory, shelfTable } from './shelf.js'
 
 export const name = 'dsh-hypatia-auto-memory'
@@ -107,14 +107,28 @@ function applyCollect(ctx, cordisConfig) {
       getConfig: () => configHandle.get().queue,
       status,
     })
-    const cli = createHypatiaCli(ctx, {
+    const cli = createHypatiaClient(ctx, {
       get binaries() {
         return configHandle.get().binaries
       },
+      get transport() {
+        return configHandle.get().transport
+      },
       shelf,
-      log: (message) => status.info(message),
-    })
-    status.info(`writing to shelf "${shelf}"`)
+    }, { status })
+    // In-flight tasks drain (up to the queue's deadline) before the process
+    // they write through is closed.
+    ctx.effect(() => () => {
+      void queue.dispose().finally(() => cli.dispose())
+    }, `${name}: dispose queue and hypatia connection`)
+    // The configured transport; a binary without `mcp` is only found out, and
+    // warned about, at the first call.
+    status.info(`writing to shelf "${shelf}" (transport: ${configHandle.get().transport})`)
+
+    // Before the collector can queue anything and before any executor can run
+    // a task: see housekeeping.js.
+    await normalizeTaskProjects({ tasks: state.tasks, status })
+    if (disposed) return
 
     // What the settings card offers as choices. Also the one place a missing
     // shelf is noticed before the first write fails on it.
@@ -378,8 +392,8 @@ function applyCollect(ctx, cordisConfig) {
 
     // Auto-approve is for the agent's OWN bash `hypatia` calls — retrieval,
     // explicit remember/forget. This plugin's writes never pass through it:
-    // they are argv arrays on the subprocess service, with no shell and no
-    // approval in the path.
+    // they go over its own `hypatia mcp` connection (or argv arrays on the
+    // CLI fallback), with no shell, no tool call and no approval in the path.
     if (configHandle.get().autoApprove !== false) {
       ctx.plugin({
         name: `${name}/auto-approve`,
@@ -400,9 +414,5 @@ function applyCollect(ctx, cordisConfig) {
         },
       })
     }
-
-    ctx.effect(() => () => {
-      void queue.dispose()
-    }, `${name}: dispose queue`)
   }
 }

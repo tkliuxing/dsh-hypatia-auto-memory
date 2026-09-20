@@ -1,5 +1,5 @@
 /**
- * Startup housekeeping for the progress table.
+ * Startup housekeeping for the progress and task tables.
  *
  * A progress row is this plugin's only record of how far a session has been
  * logged and consolidated. It lives in DSH's storage, not in hypatia, so the two
@@ -18,6 +18,7 @@
  * @module dsh-hypatia-auto-memory/housekeeping
  */
 
+import { projectScope } from './content-policy.js'
 import { EMPTY_PROGRESS, advanceProgress } from './progress.js'
 
 /**
@@ -158,4 +159,39 @@ export async function backfillConsolidation({ progress, queue, cwdFor, projectFo
     status.info(`consolidation backfill: queued ${enqueued.length} session(s) whose logged tail was never consolidated`)
   }
   return { enqueued, skippedBelowFloor }
+}
+
+/**
+ * Rewrite each persisted task's project to the scope `projectScope` makes of
+ * it.
+ *
+ * A task carries the project it was queued under, and its executor writes with
+ * it as stored. One queued before project names became scopes — for a session
+ * at `/`, or in a directory whose name has a comma — would otherwise write one
+ * more span that no query of its project finds. Every kind of task is queued
+ * with a project, so an empty one can only be the `/` case. Run before any
+ * executor is registered, so no task is read mid-rewrite.
+ *
+ * @param {{tasks: any, status: import('./status.js').StatusLog}} deps
+ * @returns {Promise<number>} how many tasks were rewritten.
+ */
+export async function normalizeTaskProjects({ tasks, status }) {
+  if (typeof tasks.entries !== 'function') return 0
+  let rewritten = 0
+  for (const [id, record] of [...tasks.entries()]) {
+    // A failed task never runs again; it is kept, or pruned, as it stands.
+    if (typeof record?.project !== 'string' || record.status === 'failed') continue
+    const scope = projectScope(record.project)
+    if (scope === record.project) continue
+    try {
+      await tasks.update(id, (task) => ({ ...task, project: scope }))
+      rewritten += 1
+    } catch (error) {
+      // Best effort: the task then writes one span under the old name, which
+      // is what it would have done anyway. Not a reason to stop collecting.
+      status.warn(`could not rewrite the project of task ${id}: ${String(error)}`)
+    }
+  }
+  if (rewritten > 0) status.info(`rewrote the project of ${rewritten} queued task(s) to a scope hypatia stores as given`)
+  return rewritten
 }

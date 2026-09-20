@@ -98,7 +98,7 @@ export function summaryName(sessionId, fromSeq, toSeq) {
 }
 
 /**
- * @param {ReturnType<import('./hypatia-cli.js').createHypatiaCli>} cli
+ * @param {ReturnType<import('./hypatia-client.js').createHypatiaClient>} cli
  * @param {{
  *   status: import('./status.js').StatusLog,
  *   adjudicate?: (unit: any, candidates: readonly any[]) => Promise<{verdict: string, target?: string} | undefined>,

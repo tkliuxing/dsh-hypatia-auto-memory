@@ -75,7 +75,7 @@ function archiveInstruction(level, count) {
 
 /**
  * @param {{
- *   cli: ReturnType<import('./hypatia-cli.js').createHypatiaCli>,
+ *   cli: ReturnType<import('./hypatia-client.js').createHypatiaClient>,
  *   llm: any,
  *   selectRoute: (routes: any) => any,
  *   getConfig: () => any,

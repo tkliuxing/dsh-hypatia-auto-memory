@@ -20,11 +20,29 @@ import {
   eventDate,
   flattenToolResult,
   oneLineError,
+  projectScope,
   redactSecrets,
 } from './content-policy.js'
 import { EMPTY_PROGRESS, advanceProgress } from './progress.js'
 
 const execFileAsync = promisify(execFile)
+
+/**
+ * Environment variables that point git at a repository other than the one
+ * around `-C`. Inherited from whatever launched DSH (a git hook, say), they
+ * would decide every session's project.
+ */
+const GIT_LOCATION_VARS = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR']
+
+/** How long one `git rev-parse` may take before the cwd's own name is used. */
+const GIT_TIMEOUT_MS = 3000
+
+/** `process.env` without {@link GIT_LOCATION_VARS}. */
+function gitEnv() {
+  const env = { ...process.env }
+  for (const name of GIT_LOCATION_VARS) delete env[name]
+  return env
+}
 
 /**
  * Events carrying a host-produced session summary, from which the protocol's
@@ -96,7 +114,7 @@ export function createCollector({ ctx, queue, progress, getConfig, status, onTur
   const projects = new Map()
   /** @type {Map<string, number>} sessionId -> unconsolidated token estimate. */
   const pendingTokens = new Map()
-  /** @type {Map<string, Promise<string>>} cwd -> git root basename promise. */
+  /** @type {Map<string, Promise<string>>} cwd -> project scope promise. */
   const projectByCwd = new Map()
   /**
    * Sessions the store has released but whose queued work has not drained.
@@ -125,13 +143,32 @@ export function createCollector({ ctx, queue, progress, getConfig, status, onTur
     pendingTokens.delete(sessionId)
   }
 
-  /** Best-effort git-root basename; falls back to the bare cwd basename. */
+  /**
+   * Best-effort git-root basename; falls back to the bare cwd basename. Either
+   * way it becomes a scope hypatia stores as given (see `projectScope`).
+   *
+   * Only git's line ending is cut: trimming is `projectScope`'s, and JS `trim`
+   * strips characters hypatia keeps. A timeout says nothing about the
+   * directory, so its fallback is not remembered for the next caller.
+   */
   function resolveProjectForCwd(cwd) {
     let cached = projectByCwd.get(cwd)
     if (cached === undefined) {
-      cached = execFileAsync('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], { timeout: 3000 })
-        .then(([out]) => basename(out.trim()))
-        .catch(() => basename(cwd))
+      cached = execFileAsync('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], {
+        timeout: GIT_TIMEOUT_MS,
+        env: gitEnv(),
+      })
+        .then(({ stdout }) => {
+          const root = stdout.replace(/\r?\n$/, '')
+          // git before 2.25 printed an empty line, exit 0, outside a work tree.
+          if (root === '') throw new Error('git printed no top level')
+          return basename(root)
+        })
+        .catch((error) => {
+          if (error?.killed) projectByCwd.delete(cwd)
+          return basename(cwd)
+        })
+        .then(projectScope)
       projectByCwd.set(cwd, cached)
     }
     return cached
