@@ -201,9 +201,10 @@ agent/session-start ──▶ rules/taboos inject()
 - **Recall** preloads project/global rules and taboos at session start. Nothing
   else is pushed, except one line naming the shelf when it is not `default`, so
   the agent's own `hypatia` calls look where the plugin writes. Retrieval is the agent's job through the bundled skill, which
-  is what `docs/memory-nolinear.md` prescribes for agents that hold context and
-  can call tools; the previous per-turn injector also vetoed DSH's own runtime
-  context section by returning from `agent/pre-step` without calling `next()`.
+  is what [`memory-nolinear.md`](https://github.com/tkliuxing/hypatia/blob/main/docs/memory-nolinear.md)
+  prescribes for agents that hold context and can call tools; the previous
+  per-turn injector also vetoed DSH's own runtime context section by returning
+  from `agent/pre-step` without calling `next()`.
 
 - **Auto-approve** answers the approval request for the agent's own bash
   `hypatia` calls, and only those: the executable word must be a trusted
@@ -362,9 +363,10 @@ changes. No card claims it, so it renders nowhere; nothing ever writes to it.
 
 Deliberate, and worth knowing before you rely on them:
 
-- **No topic-shift detection.** `docs/memory-nolinear.md` ranks topic switches
-  as the strongest session-splitting signal, above task boundaries and time
-  gaps. Detecting one needs a model call every turn, which contradicts this
+- **No topic-shift detection.**
+  [`memory-nolinear.md`](https://github.com/tkliuxing/hypatia/blob/main/docs/memory-nolinear.md)
+  ranks topic switches as the strongest session-splitting signal, above task
+  boundaries and time gaps. Detecting one needs a model call every turn, which contradicts this
   plugin's central trade-off (zero model work in the main session), so it is not
   implemented. Task boundaries (`turn/end` reasons) and session close are
   honoured; a session covering three unrelated topics is summarised as one.
