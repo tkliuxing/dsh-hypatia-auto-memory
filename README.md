@@ -222,9 +222,10 @@ agent/session-start ──▶ rules/taboos inject()
   would otherwise stop on a prompt every time the user says "remember this".
 
 - **Skills** are bundled: `hypatia-memory` in this plugin's variant (the
-  automatic layer writes, the agent retrieves), plus byte-identical copies of
-  hypatia's `hypatia` CLI reference and `hypatia-dream`, carried because
-  removing `dsh-hypatia` would otherwise take them with it. Another plugin's
+  automatic layer writes, the agent retrieves), plus vendored copies of
+  hypatia's `hypatia` CLI reference (byte-identical) and `hypatia-dream`
+  (patched, see *Known limitations*), carried because removing `dsh-hypatia`
+  would otherwise take them with it. Another plugin's
   registration of the same name is left alone and reported, since DSH keeps the
   first runtime registration. A copy on disk is registered over but still wins
   in agent sessions — presets load disk skills in a nearer layer — so it is
@@ -313,7 +314,8 @@ change), marking shelves that are registered but not connected.
   written before this setting existed.
 - **The agent follows.** When the shelf is not `default`, the session seed tells
   the agent to pass `--shelf <name>` to its own `hypatia` commands; the bundled
-  `hypatia-memory` skill says the same.
+  `hypatia-memory` skill says the same, and `hypatia-dream` consolidates that
+  shelf when the request names none.
 - **A missing shelf is logged at startup**, not refused: writes to it fail and
   retry like any other hypatia failure until it is connected
   (`hypatia connect <dir> --name <name>`). Over MCP, that failure restarts the
@@ -400,10 +402,25 @@ Deliberate, and worth knowing before you rely on them:
   batch. Everything is still archived exactly once; the grouping is just not the
   one the first attempt intended.
 - **Two of the three bundled skills are vendored copies.** `hypatia` and
-  `hypatia-dream` are byte-identical copies of the [hypatia
+  `hypatia-dream` are copied from the [hypatia
   repository](https://github.com/tkliuxing/hypatia)'s `skills/`, because a
   published package cannot reach outside itself. Nothing refreshes them: when
-  the originals change upstream, copy them in by hand.
+  the originals change upstream, copy them in by hand. `hypatia` is
+  byte-identical. `hypatia-dream` carries two local patches, which a refresh
+  must re-apply:
+  - **Shelf.** With no shelf in the request, it uses the one the session seed
+    names, and `default` only when the seed names none. Upstream always
+    falls back to `default`, which reviews a shelf this plugin may not write to
+    (see *Choosing the shelf*).
+  - **Operational relations left out of the graph read.** Both statement
+    queries exclude `summary` and `belongTo`, which the skill already treats as
+    protected and never uses as evidence. This plugin writes them for every
+    logged message, span summary and archive tier, so they were 971 of 1258
+    statements on the measured shelf. Counted against the read's 10000-row
+    limit, they would make the skill stop on its truncation check long before
+    the triples it actually reviews reach that limit.
+
+  Its `evals/evals.json` gains cases 9 and 10 for these two patches.
 - **`enabled: false` at the top level is read at plugin startup**; toggling it
   live requires a profile reload, while the per-feature switches apply
   immediately.
@@ -445,7 +462,7 @@ dsh-hypatia-auto-memory/
 ├── skills/
 │   ├── hypatia-memory/   # this plugin's variant (retrieval is the agent's)
 │   ├── hypatia/          # vendored from hypatia's skills/
-│   └── hypatia-dream/    # vendored from hypatia's skills/
+│   └── hypatia-dream/    # vendored from hypatia's skills/, with local patches
 ├── scripts/
 │   └── it-shelf.sh       # throwaway shelf for manual CLI probing
 ├── test/                 # node:test units (npm test)

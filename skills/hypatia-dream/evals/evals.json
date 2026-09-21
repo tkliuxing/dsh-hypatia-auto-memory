@@ -87,6 +87,27 @@
         "Names the non-empty content.tags as the reason the statement is ineligible for replacement.",
         "Reports the candidate rather than silently dropping it or silently losing the tags."
       ]
+    },
+    {
+      "id": 9,
+      "prompt": "（会话开头的记忆种子写着：Memory lives on the hypatia shelf `work`: add `--shelf work` to every `hypatia` command you run.）收工了，做个好梦。",
+      "expected_output": "Resolve apply mode from the closeout wording, and resolve the shelf to `work` from the session seed rather than defaulting to `default`, because the request names no shelf. Every hypatia command, including the marker query and the eventual marker write, targets `work`.",
+      "files": [],
+      "expectations": [
+        "Uses the shelf named by the session seed (`work`), not `default`.",
+        "Passes that shelf to every hypatia command that takes one, including the watermark query and the marker write."
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "对默认 shelf 做个好梦，只出报告。这个 shelf 由自动记忆插件持续写入：共 12000 条 statement，其中 11000 条是 summary 和 belongTo。",
+      "expected_output": "Read the statement graph with summary and belongTo excluded in the query itself, so the read returns about 1000 rows, well under the 10000 limit, and is complete. Proceed with a normal report instead of reporting a truncation blocker.",
+      "files": [],
+      "expectations": [
+        "Excludes summary and belongTo in both statement queries, rather than fetching them and filtering afterwards.",
+        "Does not report a truncation blocker, because the filtered read stays below the limit.",
+        "Keeps report mode read-only and leaves the watermark unchanged."
+      ]
     }
   ]
 }

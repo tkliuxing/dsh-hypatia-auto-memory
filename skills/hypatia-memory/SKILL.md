@@ -47,7 +47,7 @@ costs a wrong answer that contradicts a decision already made.
 ### Semantic search — the default
 
 ```bash
-hypatia similar "<what you actually want to know>" -t knowledge --limit 5
+hypatia similar "<what you actually want to know>" -t knowledge --limit 20
 ```
 
 Write the query as the *idea* you are looking for, not the user's words verbatim.
@@ -55,10 +55,13 @@ Rows come back as `{"name", "content" (object), "distance"}`; lower `distance` i
 closer. If it exits non-zero with `model unavailable` / `no embedding provider`,
 this shelf has no embedding model — fall back to `search` and carry on.
 
+The limit is deliberately about four times the rows you want: most of what comes
+back will be the operational layer, which you then drop (see below).
+
 ### Keyword search — for exact identifiers
 
 ```bash
-hypatia search "<exact symbol, error code, file name>" -c knowledge --limit 5
+hypatia search "<exact symbol, error code, file name>" -c knowledge --limit 20
 ```
 
 Rows come back as `{"id", "catalog", "key", "content" (**JSON-encoded string**),
@@ -88,6 +91,14 @@ so they *will* come back in results. They are not knowledge — skip rows whose
 name starts with `msg-`, `sum`, `session-`, or `hypatia-dream-run-`, and rows
 tagged `message`, `session`, `summary`, or `hypatia-dream-run`. Read `wu-*`,
 `rule`, `taboo`, and ordinary named entries.
+
+Neither `similar` nor `search` can filter by name or tag, and that layer is most
+of the shelf — every message is logged. It also matches well: a raw `msg-*`
+holds the very words of the conversation you are asking about. Measured on a
+live shelf, 7 of the 10 nearest `similar` rows were operational, so a
+`--limit 5` search filtered afterwards leaves one row or none. Hence `--limit 20`. If too few rows
+survive the filter, search again with a larger limit or a different wording
+before concluding that nothing is stored.
 
 Reach into `msg-*` only when the user asks what was literally said, and prefer
 reaching it by walking `summary` statements down from a `sum-*` entry.
@@ -151,7 +162,7 @@ not invent a vague `related_to` edge just because two entries share a topic.
 ### Forget
 
 ```bash
-hypatia search "<keywords>" -c knowledge --limit 10
+hypatia search "<keywords>" -c knowledge --limit 20
 hypatia knowledge-delete "<exact-name>"
 ```
 

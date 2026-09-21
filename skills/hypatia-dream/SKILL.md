@@ -16,7 +16,7 @@ Treat the graph as a personal knowledge base: inspect its whole available relati
 
 Trigger this skill only for a deliberate batch consolidation at a work-period boundary or an explicitly requested dream-time review. Do not trigger it for ordinary knowledge CRUD, a direct one-off triple request, an entity lookup, a relationship query, or automatic conversation-memory extraction; those belong to `hypatia` or `hypatia-memory`.
 
-Interpret the optional shelf name from the request; use `default` when it is omitted.
+Interpret the optional shelf name from the request. When the request names none, use the shelf the session's memory seed names — `dsh-hypatia-auto-memory` says *"Memory lives on the hypatia shelf `<SHELF>`"* whenever it writes somewhere other than `default` — and `default` only when nothing names a shelf. Consolidating `default` while the memory system writes elsewhere reviews a graph nobody is adding to, and an `apply` would leave its marker there.
 
 Resolve the mode in this order:
 
@@ -52,7 +52,7 @@ Do not use a vague catch-all relationship such as `related_to` merely because tw
 ## Resolve The CLI And Snapshot Boundary
 
 1. Resolve the binary in this order: `hypatia` on `PATH`, `./target/debug/hypatia`, then `./target/release/hypatia`. Stop and report a concrete blocker if none exists.
-2. Set `SHELF` to the requested shelf or `default`, then confirm that shelf is connected before doing anything else:
+2. Set `SHELF` to the shelf resolved above, then confirm that shelf is connected before doing anything else:
 
 ```bash
 hypatia list
@@ -89,14 +89,16 @@ Query results are ordered by `created_at DESC`, so `limit:1` returns the most re
 Retrieve the complete pre-snapshot relationship graph. Use a large, explicit limit because the shelf is personal and the user requested no relationship-range cap:
 
 ```bash
-hypatia query '{"$statement":[["$lte","created_at","<RUN_STARTED_AT>"]],"limit":10000}' -s "<SHELF>"
+hypatia query '{"$statement":[["$and",["$lte","created_at","<RUN_STARTED_AT>"],["$not",["$or",["$eq","relation","summary"],["$eq","relation","belongTo"]]]]],"limit":10000}' -s "<SHELF>"
 ```
 
 Retrieve the newly created triples with the collection interval. For a first pass, omit the lower-bound condition:
 
 ```bash
-hypatia query '{"$statement":[["$and",["$gt","created_at","<BASELINE>"],["$lte","created_at","<RUN_STARTED_AT>"]]],"limit":10000}' -s "<SHELF>"
+hypatia query '{"$statement":[["$and",["$gt","created_at","<BASELINE>"],["$lte","created_at","<RUN_STARTED_AT>"],["$not",["$or",["$eq","relation","summary"],["$eq","relation","belongTo"]]]]],"limit":10000}' -s "<SHELF>"
 ```
+
+Both statement queries leave out the operational `summary` and `belongTo` relations. This skill never reads them as evidence, never adds or replaces them, and never links to their endpoints (see *Hypatia Conventions To Preserve*). When conversations are logged automatically, the memory system writes them for every stored message, span summary and archive tier, so they are most of the graph: 971 of 1258 statements on the shelf this was measured on. Reading them would only use up the `limit`, and a shelf could fail the truncation check below while holding far fewer semantic triples than the limit. Every other relation stays in the read, `is_a archive` included.
 
 Also retrieve new Knowledge entries from the same interval. Exclude internal log, session, summary, and dream-marker entries by tag. For a first pass, omit the lower-bound condition:
 
@@ -217,7 +219,7 @@ Return the report in this structure, in the user's language:
 - Mode: `report` or `apply`
 - Baseline: first pass, or `<processed_through>`
 - Snapshot boundary: `<run_started_at>`
-- Reviewed: `<new knowledge count>` Knowledge entries and `<new statement count>` new triples against `<total statement count>` existing triples
+- Reviewed: `<new knowledge count>` Knowledge entries and `<new statement count>` new triples against `<total statement count>` existing triples (`summary` and `belongTo` not read)
 - Graph read: `<returned row count>` of `<limit>` rows, complete or truncated
 
 ## Relationship Findings

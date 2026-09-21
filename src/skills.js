@@ -7,12 +7,14 @@
  *                   writing, so the skill is about retrieval and explicit
  *                   remember/forget, not about logging messages by hand.
  *   hypatia         verbatim copy of hypatia's CLI reference.
- *   hypatia-dream   verbatim copy of hypatia's consolidation pass.
+ *   hypatia-dream   hypatia's consolidation pass, with local patches for a
+ *                   shelf fed by this plugin (listed in the README).
  *
  * The last two used to arrive with `dsh-hypatia`. This plugin replaces it, so
  * it carries them itself — otherwise removing `dsh-hypatia` from a profile
  * would take the CLI reference away with it. Both are vendored by hand from
- * the hypatia repository's `skills/`; nothing refreshes them automatically.
+ * the hypatia repository's `skills/`; nothing refreshes them automatically,
+ * and a refresh of `hypatia-dream` must re-apply its patches.
  *
  * @module dsh-hypatia-auto-memory/skills
  */
