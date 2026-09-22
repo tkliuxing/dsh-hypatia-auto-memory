@@ -25,6 +25,11 @@ Do not do these by hand — you would only create duplicates:
 - **Session seed.** Project and global entries tagged `rule` or `taboo` are
   injected into your context at session start. Nothing else is pushed to you.
 
+The log layer — `msg-*`, `session-*`, and the `belongTo` / `summary` edges —
+is written **without vectors** (`--no-embed`) on a hypatia that has the flag.
+It is stored and full-text searchable, but `similar` does not rank it. Entries
+logged before that, or by an older hypatia, still carry vectors.
+
 ## Which shelf
 
 The plugin writes to one hypatia shelf, chosen in its settings. When that is
@@ -47,7 +52,8 @@ costs a wrong answer that contradicts a decision already made.
 ### Semantic search — the default
 
 ```bash
-hypatia similar "<what you actually want to know>" -t knowledge --limit 20
+hypatia similar "<what you actually want to know>" -t knowledge --limit 5 \
+  --exclude-tags message,summary,session,hypatia-dream-run
 ```
 
 Write the query as the *idea* you are looking for, not the user's words verbatim.
@@ -55,8 +61,11 @@ Rows come back as `{"name", "content" (object), "distance"}`; lower `distance` i
 closer. If it exits non-zero with `model unavailable` / `no embedding provider`,
 this shelf has no embedding model — fall back to `search` and carry on.
 
-The limit is deliberately about four times the rows you want: most of what comes
-back will be the operational layer, which you then drop (see below).
+`--exclude-tags` leaves the operational layer out *before* ranking, so five rows
+asked for are five rows of knowledge. Add `--where '["$contains","scopes","<PROJECT>"]'`
+to stay inside this project. If the flag is rejected as an `unexpected argument`,
+the hypatia is older than #35: drop it, ask for `--limit 20`, and discard the
+operational rows yourself (see below).
 
 ### Keyword search — for exact identifiers
 
@@ -79,10 +88,21 @@ hypatia query '["$knowledge", ["$contains","tags","rule"],
 hypatia query '["$statement", ["$k-hop", "<entry-name>", "$*", 2]]'
 ```
 
-`<PROJECT>` is the basename of the workspace's git root (of the workspace
-itself outside git), written as the plugin writes it: commas become `_`,
-surrounding whitespace is dropped, and the filesystem root is `/`. Written raw,
-a name with a comma would be split into two scopes.
+`<PROJECT>` is the scope the plugin writes this workspace under: the basename
+of its git root (of the workspace itself outside git), with commas turned into
+`_`, surrounding whitespace dropped, and the filesystem root written `/`. You
+do not have to derive it — the plugin has already logged this session under it,
+so it is on the shelf:
+
+```bash
+hypatia scope list --count      # every scope in use, with how many entries carry it
+hypatia scope exists "<PROJECT>" # exit 0 if in use, 1 if not
+```
+
+The plain listing prints the global scope as `(global)`; that is a label, the
+value is `""`. Use `--json` when you will write a value back. Both need hypatia
+#30; an older one answers `unrecognized subcommand`, and then the rule above is
+all there is.
 
 ### Always exclude the operational layer
 
@@ -92,13 +112,14 @@ name starts with `msg-`, `sum`, `session-`, or `hypatia-dream-run-`, and rows
 tagged `message`, `session`, `summary`, or `hypatia-dream-run`. Read `wu-*`,
 `rule`, `taboo`, and ordinary named entries.
 
-Neither `similar` nor `search` can filter by name or tag, and that layer is most
-of the shelf — every message is logged. It also matches well: a raw `msg-*`
-holds the very words of the conversation you are asking about. Measured on a
-live shelf, 7 of the 10 nearest `similar` rows were operational, so a
-`--limit 5` search filtered afterwards leaves one row or none. Hence `--limit 20`. If too few rows
-survive the filter, search again with a larger limit or a different wording
-before concluding that nothing is stored.
+That layer is most of the shelf — every message is logged — and it matches
+well: a raw `msg-*` holds the very words of the conversation you are asking
+about. Measured on a live shelf, 7 of the 10 nearest `similar` rows were
+operational. `similar --exclude-tags` handles it; `search` has no such flag, and
+neither can see an operational entry that lost its tags, so still check names.
+Whenever you filter after the fact, ask for `--limit 20`, and if too few rows
+survive, search again with a larger limit or a different wording before
+concluding that nothing is stored.
 
 Reach into `msg-*` only when the user asks what was literally said, and prefer
 reaching it by walking `summary` statements down from a `sum-*` entry.
@@ -119,8 +140,14 @@ hypatia knowledge-create "<short-kebab-name>" \
   --scopes "<PROJECT>"
 ```
 
+- **Write the scope the plugin uses**, exactly. The session seed loads rules by
+  that spelling; a rule under `my-app` is invisible to a plugin that logs under
+  `my_app`. `hypatia scope list --count` shows it — the scope this project's
+  `msg-*` entries carry — and `hypatia scope exists "<PROJECT>"` confirms it
+  before you write.
 - `--tags rule` for conventions to follow, `taboo` for never-do items,
-  `memory` for durable facts.
+  `memory` for durable facts. Beyond those three, reuse what `hypatia tag list`
+  already shows before inventing a label.
 - **Scope syntax matters.** `--scopes "<PROJECT>"` is project-only.
   `--scopes "<PROJECT>,"` — with a *trailing comma* — also marks it global.
   `--scopes ""` writes no scope at all, which is not the same as global and will

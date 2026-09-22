@@ -179,8 +179,12 @@ export function createCascade({ cli, llm, selectRoute, getConfig, status }) {
       // under a different name and the first entry keeps only its partial set.
       // Nothing is lost — every member still ends up archived exactly once — but
       // the grouping boundary is not the one the first attempt intended.
+      // The archive entry is embedded — it is distilled knowledge, and the entry
+      // point for drilling down. Its edges are not: they are for the traversal
+      // and for `$not-summaried`, and nobody looks for a `summary` edge by
+      // meaning (see writer.js `writeSummary`).
       for (const member of members) {
-        await cli.statementCreate(name, 'summary', member, { scopes: [task.project] })
+        await cli.statementCreate(name, 'summary', member, { scopes: [task.project], embed: false })
       }
       status.info(`cascade: tier ${level} archived ${members.length} entries as ${name}`)
     }

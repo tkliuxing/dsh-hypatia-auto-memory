@@ -166,6 +166,25 @@ test('hypatia mcp contracts the MCP transport relies on', options, async (t) => 
     assert.deepEqual(await mcp.knowledgeGet('definitely-absent'), { found: false })
   })
 
+  await t.test('both transports read the same features off the same binary', async () => {
+    const viaMcp = await mcp.features()
+    assert.deepEqual(viaMcp, await cli.features())
+    assert.deepEqual(Object.keys(viaMcp).sort(), ['noEmbed', 'similarFilters'])
+  })
+
+  await t.test('embed: false is stored the same whichever transport wrote it', async () => {
+    const { noEmbed } = await mcp.features()
+    await mcp.knowledgeCreate('quiet-mcp', { data: 'x', tags: ['message'], embed: false })
+    await cli.knowledgeCreate('quiet-cli', { data: 'x', tags: ['message'], embed: false })
+    assert.deepEqual(stored('quiet-mcp'), stored('quiet-cli'))
+    // On a binary with the flag the marker is there; on an older one both
+    // transports dropped the request rather than failing the write.
+    assert.equal(stored('quiet-mcp').embed, noEmbed ? false : undefined)
+    assert.equal(await mcp.statementCreate('quiet-mcp', 'belongTo', 'quiet-cli', { embed: false }), true)
+    const [edge] = await mcp.query(JSON.stringify(['$statement', ['$triple', 'quiet-mcp', 'belongTo', 'quiet-cli']]))
+    assert.equal(edge.content.embed, noEmbed ? false : undefined)
+  })
+
   await t.test('the writer runs end to end over MCP', async () => {
     const writer = createWriter(mcp, { status: { warn: () => {}, info: () => {}, count: () => {} } })
     await writer.writeMessage({ sessionId: 'it', index: 1, markdown: '**User**: hi', project: 'proj' })
@@ -173,6 +192,8 @@ test('hypatia mcp contracts the MCP transport relies on', options, async (t) => 
     const entry = await mcp.knowledgeGet('msg-it-1')
     assert.equal(entry.found, true)
     assert.deepEqual(entry.content.tags, ['message'])
+    // The log layer opts out of the vector index wherever the binary allows.
+    assert.equal(entry.content.embed, (await mcp.features()).noEmbed ? false : undefined)
   })
 })
 

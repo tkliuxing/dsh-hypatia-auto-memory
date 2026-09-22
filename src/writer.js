@@ -29,11 +29,19 @@ const OPERATIONAL_PREFIXES = ['msg-', 'sum', 'session-', 'hypatia-dream-run-']
 const OPERATIONAL_TAGS = new Set(['message', 'session', 'hypatia-dream-run'])
 
 /**
- * How many rows to ask `similar` for per candidate actually wanted.
+ * The same layer as tags `similar` can be told to leave out (hypatia #35).
+ * `summary` alone covers every summary tier: each carries it beside its
+ * `summary <N>` tag.
+ */
+export const EXCLUDED_TAGS = Object.freeze([...OPERATIONAL_TAGS, 'summary'])
+
+/**
+ * How many rows to ask `similar` for per candidate actually wanted, on a
+ * binary whose `similar` cannot exclude tags.
  *
- * The operational layer cannot be excluded in the query (see `findCandidates`),
- * outnumbers knowledge on an active shelf, and ranks nearer, so the fetch has
- * to absorb it. Four covers the measured 7-in-10 ratio with room to spare.
+ * There the operational layer is ranked along with everything else, outnumbers
+ * knowledge on an active shelf, and ranks nearer, so the fetch has to absorb
+ * it. Four covers the measured 7-in-10 ratio with room to spare.
  */
 const CANDIDATE_OVERSAMPLE = 4
 
@@ -113,6 +121,13 @@ export function createWriter(cli, { status, adjudicate }) {
    * from a replayed task) are counted and skipped — the watermark must still
    * advance past them, which the queue does based on the resolved range.
    *
+   * Written with `embed: false`: the log layer is not on the retrieval hot
+   * path — `docs/memory-nolinear.md` has precise recall drill down from a
+   * summary along `summary` edges — and embedded, a raw message outranks the
+   * knowledge distilled from it, because it holds the very words. It stays
+   * stored and full-text searchable; only the vector is not made. On a binary
+   * without `--no-embed` the flag is dropped by the transport.
+   *
    * @param {{sessionId: string, index: number, markdown: string, project: string}} entry
    */
   async function writeMessage({ sessionId, index, markdown, project }) {
@@ -122,7 +137,7 @@ export function createWriter(cli, { status, adjudicate }) {
       status.count('duplicate')
       return { name, written: false }
     }
-    await cli.knowledgeCreate(name, { data: markdown, tags: ['message'], scopes: [project] })
+    await cli.knowledgeCreate(name, { data: markdown, tags: ['message'], scopes: [project], embed: false })
     status.count('written')
     return { name, written: true }
   }
@@ -147,6 +162,11 @@ export function createWriter(cli, { status, adjudicate }) {
    *   permanent. `statementCreate` swallows primary-key collisions, so
    *   re-asserting an existing edge is free.
    *
+   * The summary itself is embedded — it is distilled knowledge and the entry
+   * point for drilling down. Its edges are written `embed: false`: they exist
+   * for the traversal and for `$not-summaried`, and statements carry no tags,
+   * so a shelf's `embedding.skip_tags` could not reach them.
+   *
    * @param {{sessionId: string, fromSeq: number, toSeq: number, markdown: string,
    *          project: string, items?: readonly string[], level?: number}} entry
    * `level` is the archive tier this summary sits at (1 = summarises messages).
@@ -168,7 +188,7 @@ export function createWriter(cli, { status, adjudicate }) {
       status.count('written')
     }
     for (const item of items) {
-      await cli.statementCreate(name, 'summary', item, { scopes: [project] })
+      await cli.statementCreate(name, 'summary', item, { scopes: [project], embed: false })
     }
     return { name, written: existing.found === false, links: items.length }
   }
@@ -183,6 +203,10 @@ export function createWriter(cli, { status, adjudicate }) {
    *
    * hypatia has no `knowledge-update`, so a second title cannot replace the
    * first; the original stands and the caller is told nothing was written.
+   *
+   * Node and `belongTo` edges are written `embed: false`, as the messages are:
+   * the node is bookkeeping for the traversal, and its title is what
+   * `session/title` already gave DSH.
    *
    * @param {{sessionId: string, markdown: string, project: string,
    *          linkFrom: number, linkTo: number}} entry - `[linkFrom, linkTo)` is
@@ -200,11 +224,11 @@ export function createWriter(cli, { status, adjudicate }) {
       // it absent and drop the edges with it.
       return { name, written: false, links: 0 }
     } else {
-      await cli.knowledgeCreate(name, { data: markdown, tags: ['session'], scopes: [project] })
+      await cli.knowledgeCreate(name, { data: markdown, tags: ['session'], scopes: [project], embed: false })
       status.count('written')
     }
     for (let index = linkFrom; index < linkTo; index += 1) {
-      await cli.statementCreate(messageName(sessionId, index), 'belongTo', name, { scopes: [project] })
+      await cli.statementCreate(messageName(sessionId, index), 'belongTo', name, { scopes: [project], embed: false })
     }
     return { name, written: existing.found === false, links: Math.max(0, linkTo - linkFrom) }
   }
@@ -220,19 +244,24 @@ export function createWriter(cli, { status, adjudicate }) {
    */
   async function findCandidates(unit, name, { maxDistance, limit }) {
     try {
-      // OVERSAMPLED, because the exclusion below cannot be pushed into the
-      // query: `hypatia similar` takes only target/limit/shelf, no tag or scope
-      // filter. The operational layer is the majority of an active shelf (101
-      // of 183 knowledge entries on the profile this was measured on) and it
-      // scores CLOSER than real knowledge — a raw `msg-*` holds the very words
-      // of the conversation the unit was extracted from. Measured: 7 of the
-      // nearest 10 rows were operational, so asking for 5 and filtering
-      // afterwards left one candidate, often none, and adjudication silently
-      // degraded to "no relationship" on every write.
+      // The operational layer is excluded IN the query where the binary allows
+      // it (hypatia #35), and over-fetched around where it does not. It is the
+      // majority of an active shelf (101 of 183 knowledge entries on the
+      // profile this was measured on) and it scores CLOSER than real knowledge
+      // — a raw `msg-*` holds the very words of the conversation the unit was
+      // extracted from. Measured: 7 of the nearest 10 rows were operational, so
+      // asking for 5 and filtering afterwards left one candidate, often none,
+      // and adjudication silently degraded to "no relationship" on every write.
+      // Entries this plugin now writes `embed: false` are not ranked at all,
+      // but a shelf holds what earlier versions and other writers embedded.
+      const { similarFilters } = await cli.features()
       const rows = await cli.similar(`${unit.title}\n${unit.content}`.slice(0, 500), {
         target: 'knowledge',
-        limit: Math.min(limit * CANDIDATE_OVERSAMPLE, CANDIDATE_FETCH_CEILING),
+        limit: similarFilters ? limit : Math.min(limit * CANDIDATE_OVERSAMPLE, CANDIDATE_FETCH_CEILING),
+        excludeTags: EXCLUDED_TAGS,
       })
+      // The name-prefix half of `isOperationalRow` still applies: a tag filter
+      // cannot see an operational entry that lost its tags.
       return rows
         .filter((row) => rowName(row) !== name)
         .filter((row) => !isOperationalRow(row))

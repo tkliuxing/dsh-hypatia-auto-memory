@@ -24,7 +24,12 @@ ships here: auto-approval for the agent's own bash `hypatia` calls, and its
 
 Prerequisite: `hypatia` CLI on PATH (or add its basename to `binaries`). A
 build with the `mcp` subcommand (hypatia #20) is used over MCP; an older one
-works through the CLI instead, with one warning at the first call.
+works through the CLI instead, with one warning at the first call. Two later
+additions are used when the binary has them and skipped when it does not:
+`--no-embed` (hypatia #26) keeps the log layer out of the vector index, and
+`similar --exclude-tags` (#35) keeps it out of the work-unit candidate search.
+The first call logs which the binary offers
+(`hypatia over mcp: no-embed yes, similar filters yes`).
 
 ```bash
 # from a local checkout (development)
@@ -129,6 +134,19 @@ agent/session-start ──▶ rules/taboos inject()
   `(tool calls only)`. Plugin-sourced
   messages are skipped — no feedback loops.
 
+- **The log layer is not embedded.** `msg-*` and `session-*` entries and the
+  `belongTo` / `summary` edges are written `embed: false` (hypatia #26): stored,
+  full-text indexed and reachable by JSE, but given no vector. The protocol has
+  precise recall drill down from a summary along `summary` edges rather than
+  hit raw messages by meaning, and embedded, a raw message outranks the
+  knowledge distilled from it because it holds the very words. On the shelf
+  this was measured on the layer was 85% of entries and 77% of statements, each
+  costing a forward pass on the conversation's hot path. Summaries and work
+  units are embedded as before. Statements have no tags, so a shelf's
+  `embedding.skip_tags` could not have reached the edges; the plugin says so per
+  write. On a binary without the flag the transport drops it and everything is
+  embedded as it always was.
+
   Spans are cut at `turn/end`, and — for a turn that outlasts `flushWindowMs` —
   at `step/end`, never at an arbitrary moment. DSH appends `assistant/message`
   *before* running the tools it requested and `step/end` only after they have
@@ -164,8 +182,10 @@ agent/session-start ──▶ rules/taboos inject()
   previous tier already distilled.
 
 - **Work units** are adjudicated, not guessed. Candidates come from `similar`
-  (the only search that reports a distance), filtered by a distance ceiling and
-  by an exclusion list for the operational layer, then a small model call
+  (the only search that reports a distance), with the operational layer left
+  out — in the query, by `--exclude-tags`, on a binary that has it (hypatia
+  #35); by fetching four times as many rows and dropping them on one that does
+  not — and filtered by a distance ceiling, then a small model call
   decides `duplicate | refines | extends | supersedes | contradicts | unrelated`.
   A contradiction keeps **both** entries and records `supersedes` — a memory
   system must not quietly forget what it once believed.
@@ -335,7 +355,12 @@ changes. No card claims it, so it renders nowhere; nothing ever writes to it.
    (get-before-create); uncovered ranges are re-enqueued from watermarks.
 4. To check the route warning: consolidation with no selected `models`
    logs a one-time warning and otherwise stays silent.
-5. Uninstall: `dsh plugin --profile web remove dsh-hypatia-auto-memory` —
+5. `hypatia backfill --status` reports the shelf's embedding debt. With a
+   current hypatia, logging a turn adds nothing to it; only summaries and work
+   units are pending until the next flush. `hypatia scope list --count` shows
+   the scopes in use — the one this project's `msg-*` entries carry is the one
+   the session seed reads.
+6. Uninstall: `dsh plugin --profile web remove dsh-hypatia-auto-memory` —
    hypatia entries themselves are left in `~/.hypatia/`.
 
 ## Failure modes
@@ -347,7 +372,8 @@ changes. No card claims it, so it renders nowhere; nothing ever writes to it.
 | Entries appear only after a turn finishes | By design: spans are cut at `turn/end`, or at the first `step/end` once a turn has run longer than `flushWindowMs`, so an entry never lacks its own tool results |
 | Logging works, no summaries | `consolidation.models` is empty or invalid — one warning at first trigger |
 | Summaries but no `sum2-*` | Fewer than `cascade.batchSize` unarchived tier-1 summaries in that project yet |
-| Work units have no relationships | No embedding model on the shelf (`similar` fails), or every candidate was beyond `dedupMaxDistance` |
+| Work units have no relationships | No embedding model on the shelf (`similar` fails), or every candidate was beyond `dedupMaxDistance`. Since hypatia #19 the local model is looked up in `~/.hypatia/models/<org>/<name>` (or the Hugging Face cache), no longer beside the shelf: a shelf that used to answer `similar` and now says `is not installed` needs `hypatia model install <model>`, or `hypatia model register <model> <dir>` pointing at the files it already has |
+| `similar` still returns `msg-*` rows | They were written before this plugin opted the log layer out of embedding, or by a hypatia without `--no-embed`. Retract the knowledge vectors once with `embedding.skip_tags = ["message", "session"]` in the shelf's `shelf.toml` followed by `hypatia backfill` (a binary older than the key refuses to open the shelf, so upgrade every binary sharing it first). Statements have no tags and no update command, so `belongTo` / `summary` edges written before keep their vectors |
 | Task in `deferred` state | Neither the live store nor persistence could supply its session. Not an error: it spends no attempts and runs as soon as one of them can. Normally storage answers immediately — the state persists only when `sessionPersistence` is absent from the composition, or its read failed (look for `could not be read` in the log) |
 | Task in `failed` state | A hypatia or model error persisted after `maxAttempts`. Failed `log-message` records are pruned at the next startup, since the watermark re-derives their range; other kinds are kept for inspection — delete one to let the next trigger re-create it |
 | Watermark says logged, but the shelf has no entries | The shelf was reset or switched after logging. Handled at startup: `housekeeping.reconcileOnStartup` resets any row whose session has no `msg-*` left, and that session is re-logged — and re-consolidated — from the start on its next activity. A shelf query that fails leaves the row untouched. A session whose messages were all deleted on purpose is indistinguishable and is logged again; turn the switch off if that matters |
@@ -359,7 +385,7 @@ changes. No card claims it, so it renders nowhere; nothing ever writes to it.
 | The agent's own `hypatia` write still asks for approval | `autoApprove: false` (needs a profile reload to change), the command pipes/redirects/chains outside quotes, or its first word is not one of `binaries` — only plain calls are answered, by design. Reads never reach approval at all, so nothing to fix there |
 | The agent got a memory protocol that tells it to log messages by hand | Another plugin registered `hypatia-memory` first (`dsh-hypatia` still in the profile), or a `hypatia-memory` exists on disk — typically `~/.agents/skills/hypatia-memory`, written by `hypatia skill install --agent codex`. Agent presets load disk skills in a layer nearer than plugins, so it wins in sessions even though the skill center may list this plugin. Remove the copy the startup warning names |
 | Startup warnings never appear in the terminal | `dsh web` mounts no log exporter, so plugin log lines of any level go nowhere; the console exporter's default threshold would also drop warnings (warn is level 2, above info's 1). Mount a logger such as `dsh-logbook` or `dsh-boot-doctor` temporarily to read them |
-| Project scope looks wrong | Scope = basename of the session cwd's git top level (`git rev-parse --show-toplevel`), or of the cwd itself when git finds no work tree or cannot answer (not installed, a repo it refuses as unsafe). A `rev-parse` slower than 3 s leaves that one session on the cwd's own name. Two same-named checkouts share a scope by design; a linked worktree is scoped by its own directory, not the main checkout's; git resolves symlinks, so a checkout opened through a link named differently from its target gets the target's name. A name hypatia would rewrite is normalized first: a session at `/` is scoped `/`, commas become `_`, surrounding whitespace goes. Entries written before these fixes stay where they were stored: a subdirectory session's under that directory's name (`repo/src` wrote under `src` — the git root was never read), a session at `/` with no scope, `a,b` under both `a` and `b`, `foo,` under `foo` and global. Padded names were stored trimmed, which is what the query now asks for. Nothing migrates them; `knowledge-update --scopes` moves one entry and keeps its `created_at` |
+| Project scope looks wrong | Scope = basename of the session cwd's git top level (`git rev-parse --show-toplevel`), or of the cwd itself when git finds no work tree or cannot answer (not installed, a repo it refuses as unsafe). A `rev-parse` slower than 3 s leaves that one session on the cwd's own name. Two same-named checkouts share a scope by design; a linked worktree is scoped by its own directory, not the main checkout's; git resolves symlinks, so a checkout opened through a link named differently from its target gets the target's name. A name hypatia would rewrite is normalized first: a session at `/` is scoped `/`, commas become `_`, surrounding whitespace goes. Entries written before these fixes stay where they were stored: a subdirectory session's under that directory's name (`repo/src` wrote under `src` — the git root was never read), a session at `/` with no scope, `a,b` under both `a` and `b`, `foo,` under `foo` and global. Padded names were stored trimmed, which is what the query now asks for. Nothing migrates them; `knowledge-update --scopes` moves one entry and keeps its `created_at`. `hypatia scope list --count` (hypatia #30) shows every spelling in use and how many entries each holds |
 
 ## Known limitations
 
@@ -392,6 +418,12 @@ Deliberate, and worth knowing before you rely on them:
   exits 0 with `Statement already exists`); on an older binary the same
   error-text path covers it. The matching is confined to one function, and
   `test/integration` accepts either statement behaviour.
+- **What was embedded stays embedded.** The log layer opts out of the vector
+  index at write time, so entries and edges written before this version, or by
+  a hypatia without `--no-embed`, keep their vectors and keep surfacing in
+  `similar`. `skip_tags` + `backfill` retracts the knowledge entries' (see
+  *Failure modes*); the edges have no retraction path short of deleting and
+  recreating them, which the plugin does not do.
 - **Adjudication and dedup need an embedding model.** On a shelf without one,
   `similar` fails outright and work units are stored with no relationship —
   never dropped.

@@ -185,6 +185,36 @@ test('hypatia CLI contracts the plugin parses', options, async (t) => {
     assert.match(result.stderr, /model unavailable|no embedding provider/i)
   })
 
+  await t.test('the flags the feature probe reads off --help do what the plugin expects', () => {
+    // hypatia-cli.js decides whether to send `--no-embed` and `--exclude-tags`
+    // by their presence in `--help`. On a binary that lists them, the flags
+    // must be accepted and mean what the plugin takes them to mean; on one that
+    // does not, the plugin sends neither, and this test has nothing to check.
+    const createHelp = hyp(['knowledge-create', '--help'])
+    const similarHelp = hyp(['similar', '--help'])
+    assert.equal(createHelp.status, 0)
+    assert.equal(similarHelp.status, 0)
+    if (createHelp.stdout.includes('--no-embed')) {
+      assert.match(hyp(['statement-create', '--help']).stdout, /--no-embed/, 'both write commands took the flag in hypatia #26')
+      const created = hyp(['knowledge-create', 'p-unembedded', '--data=x', '--tags', 'message', '--no-embed'])
+      assert.equal(created.status, 0, created.stderr)
+      // Stored, found by JSE, and marked: the entry carries the answer it was
+      // written with, which is how `backfill` knows to leave it alone.
+      assert.equal(contentOf('p-unembedded').embed, false)
+      assert.notEqual(contentOf('p-plain').embed, false, 'an entry that said nothing carries no marker')
+      const edge = hyp(['statement-create', 'p-unembedded', 'belongTo', 'p-plain', '--no-embed'])
+      assert.equal(edge.status, 0, edge.stderr)
+      const rows = JSON.parse(hyp(['query', JSON.stringify(['$statement', ['$triple', 'p-unembedded', 'belongTo', 'p-plain']])]).stdout)
+      assert.equal(rows[0].content.embed, false)
+    }
+    if (similarHelp.stdout.includes('--exclude-tags')) {
+      // No model on this shelf, so the call fails — but it must fail on the
+      // model, having parsed the flag, not on the flag.
+      const result = hyp(['similar', 'm1', '-t', 'knowledge', '--limit', '2', '--exclude-tags', 'message,summary'])
+      assert.doesNotMatch(result.stderr, /unexpected argument/)
+    }
+  })
+
   await t.test('an empty result set is exit 0 with the shared sentinel', () => {
     const empty = hyp(['search', 'zzzznomatchzzzz', '-c', 'knowledge', '--limit', '2'])
     assert.equal(empty.status, 0)

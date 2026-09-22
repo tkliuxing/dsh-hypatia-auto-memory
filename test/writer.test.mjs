@@ -3,11 +3,24 @@ import assert from 'node:assert/strict'
 
 import { createWriter } from '../src/writer.js'
 
-/** In-memory hypatia CLI stub with scripted behaviors. */
-function makeStub({ existing = new Set(), searchRows = [], similarRows = [], failCreate = false } = {}) {
+/**
+ * In-memory hypatia CLI stub with scripted behaviors. `features` is what the
+ * binary would report; the default is one that embeds on request but cannot
+ * filter `similar`, so the over-fetch path is the one most tests exercise.
+ */
+function makeStub({
+  existing = new Set(),
+  searchRows = [],
+  similarRows = [],
+  failCreate = false,
+  features = { noEmbed: true, similarFilters: false },
+} = {}) {
   const calls = { get: [], create: [], statements: [], similar: [] }
   const stub = {
     calls,
+    async features() {
+      return features
+    },
     async knowledgeGet(name) {
       calls.get.push(name)
       return existing.has(name)
@@ -61,6 +74,9 @@ test('writeMessage creates missing entries', async () => {
   assert.equal(stub.calls.create.length, 1)
   assert.deepEqual(stub.calls.create[0].entry.tags, ['message'])
   assert.deepEqual(stub.calls.create[0].entry.scopes, ['demo'])
+  // The log layer is not on the retrieval hot path, and embedded it outranks
+  // the knowledge distilled from it. Stored and full-text indexed; no vector.
+  assert.equal(stub.calls.create[0].entry.embed, false)
 })
 
 test('writeMessage skips existing entries (idempotent replay)', async () => {
@@ -97,6 +113,11 @@ test('writeSummary links the entries it is given, without probing the seq space'
   // safe: tags travel as one argv element that hypatia splits on commas, with no
   // shell in between (asserted end-to-end in test/integration).
   assert.deepEqual(stub.calls.create[0].entry.tags, ['summary', 'summary 1'])
+  // The summary is distilled knowledge and IS embedded; its edges are for the
+  // traversal and `$not-summaried`, and a shelf's `skip_tags` cannot reach a
+  // statement, so they say so themselves.
+  assert.notEqual(stub.calls.create[0].entry.embed, false)
+  assert.deepEqual(stub.calls.statements.map((s) => s.entry.embed), [false, false])
 })
 
 test('writeSummary replay re-asserts edges a crash left unwritten', async () => {
@@ -171,13 +192,43 @@ test('writeWorkUnit ignores operational rows when looking for relatives', async 
   )
 })
 
-test('the candidate fetch oversamples, since the exclusion cannot be pushed into the query', async () => {
-  // `hypatia similar` takes only target/limit/shelf — no tag or scope filter —
-  // and the operational layer both outnumbers knowledge and scores NEARER: a
-  // raw `msg-*` holds the very words the unit was extracted from. Measured on a
-  // live shelf: 7 of the nearest 10 rows were operational. Asking for exactly
-  // the number wanted therefore left one candidate, often none, and every write
-  // silently degraded to "no relationship".
+test('the candidate fetch excludes the operational layer in the query where the binary can', async () => {
+  // hypatia #35 gave `similar` `--exclude-tags`: the layer is left out BEFORE
+  // ranking, so the rows asked for are the rows wanted and nothing is fetched
+  // to be thrown away. The name-prefix filter stays for an entry that lost its
+  // tags.
+  const stub = makeStub({
+    features: { noEmbed: true, similarFilters: true },
+    similarRows: [
+      { name: 'sum-untagged-0-9', content: { tags: [] }, distance: 0.01 },
+      { name: 'wu-real-memory-aabbccdd', content: { tags: ['memory', 'work-unit'] }, distance: 0.2 },
+    ],
+  })
+  const seen = []
+  const writer = createWriter(stub, {
+    status: makeStatus(),
+    adjudicate: async (_unit, candidates) => {
+      seen.push(candidates.map((row) => row.name))
+      return { verdict: 'extends', target: 'wu-real-memory-aabbccdd' }
+    },
+  })
+  await writer.writeWorkUnit(unitFixture())
+
+  assert.equal(stub.calls.similar[0].options.limit, 5, 'five wanted, five fetched')
+  assert.deepEqual(
+    [...stub.calls.similar[0].options.excludeTags].sort(),
+    ['hypatia-dream-run', 'message', 'session', 'summary'],
+  )
+  assert.deepEqual(seen, [['wu-real-memory-aabbccdd']])
+})
+
+test('the candidate fetch oversamples on a binary whose similar cannot exclude tags', async () => {
+  // Before hypatia #35, `hypatia similar` took only target/limit/shelf — no tag
+  // or scope filter — and the operational layer both outnumbers knowledge and
+  // scores NEARER: a raw `msg-*` holds the very words the unit was extracted
+  // from. Measured on a live shelf: 7 of the nearest 10 rows were operational.
+  // Asking for exactly the number wanted therefore left one candidate, often
+  // none, and every write silently degraded to "no relationship".
   const operational = Array.from({ length: 7 }, (_, index) => ({
     name: `msg-s1-${index}`,
     content: { tags: ['message'] },
@@ -296,6 +347,9 @@ test('writeSessionNode creates the node and links the message range it is given'
   assert.equal(result.written, true)
   assert.equal(result.links, 3)
   assert.deepEqual(stub.calls.create[0].entry.tags, ['session'])
+  // Bookkeeping for the traversal, like the messages it groups: no vectors.
+  assert.equal(stub.calls.create[0].entry.embed, false)
+  assert.deepEqual(stub.calls.statements.map((s) => s.entry.embed), [false, false, false])
   // Direction is message -> session, the protocol's `belongTo` orientation.
   assert.deepEqual(
     stub.calls.statements.map((s) => [s.head, s.relation, s.tail]),

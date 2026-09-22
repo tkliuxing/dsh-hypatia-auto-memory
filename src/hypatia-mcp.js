@@ -51,6 +51,27 @@ export const REQUIRED_TOOLS = Object.freeze([
 ])
 
 /**
+ * What a server can do beyond REQUIRED_TOOLS, read off the schemas in its
+ * `tools/list`. Every tool declares `additionalProperties: false`, so an
+ * argument a server does not list fails the call as a validation error rather
+ * than being ignored — which is why the plugin asks first instead of trying.
+ * The names mirror hypatia-cli.js's `features()`.
+ *
+ * @param {Array<{name?: string, inputSchema?: {properties?: object}}>} tools
+ * @returns {{noEmbed: boolean, similarFilters: boolean}}
+ */
+export function featuresOf(tools) {
+  const accepts = (name, argument) => Object.hasOwn(
+    tools.find((tool) => tool?.name === name)?.inputSchema?.properties ?? {},
+    argument,
+  )
+  return {
+    noEmbed: accepts('knowledge_create', 'embed') && accepts('statement_create', 'embed'),
+    similarFilters: accepts('similar', 'exclude_tags'),
+  }
+}
+
+/**
  * One request line. A lone UTF-16 surrogate — what a `.slice()` through an
  * emoji leaves behind — is written by `JSON.stringify` as a bare `\ud83d`
  * escape, which hypatia's JSON parser rejects, failing the whole request. The
@@ -255,11 +276,13 @@ export function createMcpConnection(ctx, options) {
       }, handshakeTimeoutMs)
       conn.handle.stdin.write(encode({ jsonrpc: '2.0', method: 'notifications/initialized' }))
       const listed = await request(conn, 'tools/list', {}, handshakeTimeoutMs)
-      const names = new Set((listed?.tools ?? []).map((tool) => tool?.name))
+      const tools = listed?.tools ?? []
+      const names = new Set(tools.map((tool) => tool?.name))
       const missing = REQUIRED_TOOLS.filter((name) => !names.has(name))
       if (missing.length > 0) {
         throw new HypatiaCliError(`hypatia mcp lacks ${missing.join(', ')}`, { code: 'MCP_UNAVAILABLE' })
       }
+      conn.features = featuresOf(tools)
     } catch (error) {
       kill(conn, error)
       if (!isUnavailable(error)) throw error
@@ -282,6 +305,37 @@ export function createMcpConnection(ctx, options) {
     idleTimer.unref?.()
   }
 
+  /**
+   * Run `step` against a live, handshaken process, after the steps before it.
+   * @template T
+   * @param {(conn: object) => Promise<T>} step
+   * @returns {Promise<T>}
+   */
+  function withProcess(step) {
+    const run = async () => {
+      if (disposed) throw new HypatiaCliError('hypatia mcp connection disposed', { code: 'MCP_CLOSED' })
+      if (unavailable !== undefined) throw unavailable
+      clearTimeout(idleTimer)
+      try {
+        if (current === undefined || current.closed) {
+          const conn = await open()
+          // Disposed during the handshake: nothing else would close it.
+          if (disposed) {
+            close(conn)
+            throw new HypatiaCliError('hypatia mcp connection disposed', { code: 'MCP_CLOSED' })
+          }
+          current = conn
+        }
+        return await step(current)
+      } finally {
+        if (!disposed) armIdle()
+      }
+    }
+    const result = chain.then(run, run)
+    chain = result.catch(() => {})
+    return result
+  }
+
   return {
     /**
      * One `tools/call`, after the calls before it.
@@ -290,31 +344,21 @@ export function createMcpConnection(ctx, options) {
      * @returns {Promise<any>} the MCP `CallToolResult`, `isError` included.
      */
     call(name, args) {
-      const run = async () => {
-        if (disposed) throw new HypatiaCliError('hypatia mcp connection disposed', { code: 'MCP_CLOSED' })
-        if (unavailable !== undefined) throw unavailable
-        clearTimeout(idleTimer)
-        try {
-          if (current === undefined || current.closed) {
-            const conn = await open()
-            // Disposed during the handshake: nothing else would close it.
-            if (disposed) {
-              close(conn)
-              throw new HypatiaCliError('hypatia mcp connection disposed', { code: 'MCP_CLOSED' })
-            }
-            current = conn
-          }
-          // An error quotes what this call made the process write, not what
-          // earlier calls did. The handshake's errors quote everything.
-          current.stderrMark = current.handle.collected.stderr?.readFrom(0).nextOffset ?? 0
-          return await request(current, 'tools/call', { name, arguments: args }, timeoutMs)
-        } finally {
-          if (!disposed) armIdle()
-        }
-      }
-      const result = chain.then(run, run)
-      chain = result.catch(() => {})
-      return result
+      return withProcess((conn) => {
+        // An error quotes what this call made the process write, not what
+        // earlier calls did. The handshake's errors quote everything.
+        conn.stderrMark = conn.handle.collected.stderr?.readFrom(0).nextOffset ?? 0
+        return request(conn, 'tools/call', { name, arguments: args }, timeoutMs)
+      })
+    },
+
+    /**
+     * What the server can do beyond REQUIRED_TOOLS (see `featuresOf`), from
+     * the handshake — starting the process if none is running.
+     * @returns {Promise<{noEmbed: boolean, similarFilters: boolean}>}
+     */
+    features() {
+      return withProcess((conn) => Promise.resolve(conn.features))
     },
 
     /** Drop the process; the next call starts a fresh one. */
@@ -438,23 +482,32 @@ export function createHypatiaMcp(connection, config) {
       }
     },
 
+    features: () => connection.features(),
+
     /**
-     * @param {{data: string, tags?: string[], scopes?: string[], shelf?: string}} entry
+     * `embed: false` keeps the entry out of the vector index (hypatia #26); a
+     * server whose `knowledge_create` does not list the argument would reject
+     * it, so there it is dropped and the entry is embedded as before.
+     *
+     * @param {{data: string, tags?: string[], scopes?: string[], embed?: boolean, shelf?: string}} entry
      * @returns {Promise<boolean>} true when this call created the entry.
      */
     async knowledgeCreate(name, entry) {
       const args = { name, shelf: entry.shelf ?? shelfOf() }
       if (entry.data) args.data = entry.data
+      if (entry.embed === false && (await connection.features()).noEmbed) args.embed = false
       return (await create('knowledge_create', lists(args, entry))) !== undefined
     },
 
     /**
-     * @param {{data?: string, scopes?: string[], shelf?: string}} [entry]
+     * `embed: false` as on `knowledgeCreate`.
+     * @param {{data?: string, scopes?: string[], embed?: boolean, shelf?: string}} [entry]
      * @returns {Promise<boolean>} true when this call created the triple.
      */
     async statementCreate(head, relation, tail, entry = {}) {
       const args = { head, relation, tail, shelf: entry.shelf ?? shelfOf() }
       if (entry.data) args.data = entry.data
+      if (entry.embed === false && (await connection.features()).noEmbed) args.embed = false
       const outcome = await create('statement_create', lists(args, { scopes: entry.scopes }))
       return outcome !== undefined && outcome.created !== false
     },
@@ -464,9 +517,17 @@ export function createHypatiaMcp(connection, config) {
       return rowsOf(await invoke('search', { query, catalog, limit, shelf }))
     },
 
-    /** Vector-similarity search; rows as the CLI prints them. */
-    async similar(query, { target = 'knowledge', limit = 5, shelf = shelfOf() } = {}) {
-      return rowsOf(await invoke('similar', { query, target, limit, shelf }))
+    /**
+     * Vector-similarity search; rows as the CLI prints them. `excludeTags`
+     * narrows the entries before they are ranked (hypatia #35) and is dropped
+     * on a server that does not list it, as on the CLI.
+     */
+    async similar(query, { target = 'knowledge', limit = 5, shelf = shelfOf(), excludeTags = [] } = {}) {
+      const args = { query, target, limit, shelf }
+      if (excludeTags.length > 0 && (await connection.features()).similarFilters) {
+        args.exclude_tags = asCliList(excludeTags)
+      }
+      return rowsOf(await invoke('similar', args))
     },
 
     /** Raw JSE query; `jse` is the JSON text the CLI would take as its argument. */

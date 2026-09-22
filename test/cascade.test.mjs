@@ -42,8 +42,8 @@ function makeCli(entriesByTag) {
       const tag = entry.tags.find((t) => t.startsWith('summary '))
       ;(entriesByTag[tag] ??= []).push({ name, content: { data: entry.data, tags: entry.tags } })
     },
-    async statementCreate(head, relation, tail) {
-      statements.push([head, relation, tail])
+    async statementCreate(head, relation, tail, entry = {}) {
+      statements.push([head, relation, tail, entry.embed])
       if (relation === 'summary') summarised.add(tail)
     },
   }
@@ -114,6 +114,10 @@ test('a full batch archives one tier up and links every member', async () => {
     cli.statements.map(([, relation, tail]) => [relation, tail]),
     [['summary', 'sum-s1-0'], ['summary', 'sum-s1-1'], ['summary', 'sum-s1-2']],
   )
+  // The archive is distilled knowledge and is embedded; its edges are for the
+  // traversal and `$not-summaried` only, so they opt out of the vector index.
+  assert.notEqual(archive.embed, false)
+  assert.deepEqual(cli.statements.map(([, , , embed]) => embed), [false, false, false])
 })
 
 test('a short tier archives nothing and stops the climb', async () => {

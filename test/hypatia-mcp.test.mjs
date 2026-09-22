@@ -4,7 +4,7 @@ import { PassThrough } from 'node:stream'
 import { createInterface } from 'node:readline'
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import { REQUIRED_TOOLS, createHypatiaMcp, createMcpConnection } from '../src/hypatia-mcp.js'
+import { REQUIRED_TOOLS, createHypatiaMcp, createMcpConnection, featuresOf } from '../src/hypatia-mcp.js'
 import { createHypatiaClient } from '../src/hypatia-client.js'
 
 const ok = (structured) => ({
@@ -28,10 +28,15 @@ const toolError = (text) => ({ content: [{ type: 'text', text }], isError: true 
  * `mode` shapes the process as a whole: `'old-binary'` exits 2 with clap's
  * usage error, `'crash-on-start'` exits 1, `'slow-start'` answers `initialize`
  * after `handshakeDelayMs`, `'spawn-fails'` rejects `done`.
+ *
+ * `schemas` maps a tool name to the `inputSchema` its `tools/list` entry
+ * carries; a tool not in it is listed by name alone, as a server from before
+ * the argument in question would list it.
  */
 function fakeSubprocess({
   onCall = () => ok({}),
   tools = REQUIRED_TOOLS,
+  schemas = {},
   mode = 'ok',
   cliStdout = '',
   replyDelayMs = 0,
@@ -104,7 +109,7 @@ function fakeSubprocess({
               const delay = mode === 'slow-start' ? handshakeDelayMs : replyDelayMs
               reply({ id: message.id, result: { protocolVersion: message.params.protocolVersion, capabilities: {} } }, delay)
             } else if (message.method === 'tools/list') {
-              reply({ id: message.id, result: { tools: tools.map((name) => ({ name })) } })
+              reply({ id: message.id, result: { tools: tools.map((name) => ({ name, inputSchema: schemas[name] })) } })
             } else if (message.method === 'tools/call') {
               const { name, arguments: args } = message.params
               proc.calls.push({ name, args })
@@ -234,6 +239,63 @@ test('search, similar and query return the rows', async (t) => {
     { query: 'grep', target: 'knowledge', limit: 2, shelf: 'default' },
     { jse: '["$knowledge"]', shelf: 'default' },
   ])
+})
+
+/** Tool schemas as `hypatia mcp` lists them since #26 (embed) and #35 (similar filters). */
+const CURRENT_SCHEMAS = {
+  knowledge_create: { type: 'object', additionalProperties: false, properties: { name: {}, data: {}, tags: {}, scopes: {}, embed: { type: 'boolean' }, shelf: {} } },
+  statement_create: { type: 'object', additionalProperties: false, properties: { head: {}, relation: {}, tail: {}, data: {}, scopes: {}, embed: { type: 'boolean' }, shelf: {} } },
+  similar: { type: 'object', additionalProperties: false, properties: { query: {}, target: {}, limit: {}, tags: {}, exclude_tags: { type: 'array' }, where: {}, shelf: {} } },
+}
+
+test('featuresOf reads the tool schemas', () => {
+  const listed = (schemas) => REQUIRED_TOOLS.map((name) => ({ name, inputSchema: schemas[name] }))
+  assert.deepEqual(featuresOf(listed(CURRENT_SCHEMAS)), { noEmbed: true, similarFilters: true })
+  assert.deepEqual(featuresOf(listed({})), { noEmbed: false, similarFilters: false })
+  // Both write tools must take `embed`; they arrived together, but a server
+  // listing it on one only would reject it on the other.
+  assert.equal(featuresOf(listed({ knowledge_create: CURRENT_SCHEMAS.knowledge_create })).noEmbed, false)
+})
+
+test('embed: false and excludeTags reach a server whose schemas list them', async (t) => {
+  const fake = fakeSubprocess({
+    schemas: CURRENT_SCHEMAS,
+    onCall: (name, args) => (name === 'similar' ? ok({ rows: [], total_count: 0 }) : ok({ ...args, created: true })),
+  })
+  const { connection, client } = mcpClient(fake)
+  t.after(() => connection.dispose())
+
+  assert.deepEqual(await client.features(), { noEmbed: true, similarFilters: true })
+  await client.knowledgeCreate('msg-s-1', { data: 'hi', tags: ['message'], embed: false })
+  await client.statementCreate('msg-s-1', 'belongTo', 'session-s', { embed: false })
+  await client.knowledgeCreate('wu-x', { data: 'lesson' })
+  await client.similar('q', { limit: 5, excludeTags: ['message', 'summary'] })
+  await client.similar('q', { limit: 5 })
+
+  const args = fake.servers[0].calls.map((c) => c.args)
+  assert.equal(args[0].embed, false)
+  assert.equal(args[1].embed, false)
+  assert.ok(!('embed' in args[2]), 'an entry that said nothing is embedded')
+  assert.deepEqual(args[3].exclude_tags, ['message', 'summary'])
+  assert.ok(!('exclude_tags' in args[4]))
+  assert.equal(fake.servers.length, 1, 'the features came from the handshake of the same process')
+})
+
+test('a server whose schemas do not list them is never sent embed or exclude_tags', async (t) => {
+  // Every tool declares additionalProperties: false, so an argument the server
+  // does not list is a validation error, not an ignored extra.
+  const fake = fakeSubprocess({
+    onCall: (name, args) => (name === 'similar' ? ok({ rows: [], total_count: 0 }) : ok({ ...args, created: true })),
+  })
+  const { connection, client } = mcpClient(fake)
+  t.after(() => connection.dispose())
+
+  assert.deepEqual(await client.features(), { noEmbed: false, similarFilters: false })
+  await client.knowledgeCreate('msg-s-1', { data: 'hi', embed: false })
+  await client.similar('q', { limit: 5, excludeTags: ['message'] })
+  const args = fake.servers[0].calls.map((c) => c.args)
+  assert.ok(!('embed' in args[0]))
+  assert.ok(!('exclude_tags' in args[1]))
 })
 
 test('any other tool error fails the call with the server\'s text', async (t) => {
@@ -456,6 +518,20 @@ test('a handshake that times out fails the call but does not give MCP up', async
   assert.equal(fake.servers[0].terminated, true)
   assert.equal(client.transport(), 'mcp')
   assert.deepEqual(warnings, [])
+})
+
+test('features follow the transport: a binary without `mcp` is probed through its help', async (t) => {
+  const fake = fakeSubprocess({ mode: 'old-binary', cliStdout: 'Options:\n      --no-embed\n      --exclude-tags <EXCLUDE_TAGS>\n' })
+  const { warnings, status } = statusLog()
+  const infos = []
+  status.info = (message) => infos.push(message)
+  const client = createHypatiaClient(fake.ctx, { binaries: ['hypatia'] }, { status })
+  t.after(() => client.dispose())
+  assert.deepEqual(await client.features(), { noEmbed: true, similarFilters: true })
+  assert.deepEqual(await client.features(), { noEmbed: true, similarFilters: true })
+  assert.equal(client.transport(), 'cli')
+  assert.equal(warnings.length, 1)
+  assert.deepEqual(infos, ['hypatia over cli: no-embed yes, similar filters yes'], 'said once')
 })
 
 test('a server lacking a required tool is not used', async (t) => {

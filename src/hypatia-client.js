@@ -54,7 +54,21 @@ export function createHypatiaClient(ctx, config, { status, connection }) {
     }
   }
 
+  /** Logged once, so the profile log says which flags this run's writes carry. */
+  let announced = false
+  async function features() {
+    const found = await via('features', [])
+    if (!announced) {
+      announced = true
+      const yes = (flag) => (flag ? 'yes' : 'no')
+      status.info?.(`hypatia over ${usesMcp() ? 'mcp' : 'cli'}: no-embed ${yes(found.noEmbed)}, similar filters ${yes(found.similarFilters)}`)
+    }
+    return found
+  }
+
   return {
+    /** What the binary can do beyond the baseline (see hypatia-cli.js `features`). */
+    features,
     knowledgeGet: (...args) => via('knowledgeGet', args),
     knowledgeCreate: (...args) => via('knowledgeCreate', args),
     statementCreate: (...args) => via('statementCreate', args),

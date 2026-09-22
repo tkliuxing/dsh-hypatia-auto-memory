@@ -68,6 +68,38 @@ hypatia knowledge-create "prefer immutable" -d "always create new objects" --tag
 hypatia knowledge-create "no mock DB" -d "never mock database in tests" --tags "taboo" --scopes "my-project,"
 ```
 
+### Listing the scopes and tags already in use
+
+A scope or tag you invent is not an error — the entry is stored, and every later
+lookup by the value you meant misses it. Check before you write:
+
+```bash
+# What this shelf already uses, with how many entries carry each
+hypatia scope list --count
+hypatia tag list --count
+
+# Exact values, when you are going to write one back
+hypatia scope list --json      # [{"value":"","entries":12},{"value":"my-project",…}]
+
+# Confirm one spelling; exit 0 if in use, 1 if not
+hypatia tag exists rule
+hypatia scope exists my-project
+hypatia scope exists ""        # the global scope
+```
+
+The plain listing prints the global scope as `(global)`. That is a label for the
+terminal, not the value — the value is the empty string, and `--json` and
+`exists` both give it back verbatim. Never copy `(global)` into `--scopes`.
+
+Both cover knowledge and statements. An entry that declares no scopes at all is
+not listed as global.
+
+| User says | Command |
+|---|---|
+| "what scopes/projects are in here?" | `hypatia scope list --count` |
+| "what tags exist?" / "which labels are used?" | `hypatia tag list --count` |
+| "is there already a `rule` tag?" | `hypatia tag exists rule` |
+
 ## Knowledge CRUD
 
 Knowledge entries are independent information points with a name, content, and tags.
@@ -75,14 +107,17 @@ Knowledge entries are independent information points with a name, content, and t
 ### Create
 
 ```
-hypatia knowledge-create <name> -d "<data>" -t "<tag1,tag2>" --figures "archive://path/to/file"
+hypatia knowledge-create <name> -d "<data>" -t "<tag1,tag2>" --figures "archive://path/to/file" [--no-embed]
 ```
+
+`--no-embed` keeps the entry out of the vector index: it is still stored and still found by `search` and `query`, but it is never embedded, so it costs no model call on the way in and is not a `similar` result. Use it for raw session logs and other bulk that carries no distilled knowledge. A shelf can skip whole tags instead, with `embedding.skip_tags` in `shelf.toml`.
 
 | User says | Command |
 |---|---|
 | "remember Rust as a systems programming language" | `hypatia knowledge-create "Rust" -d "systems programming language" -t "language,compiled"` |
 | "save knowledge about Go with tags language and compiled" | `hypatia knowledge-create "Go" -d "" -t "language,compiled"` |
 | "store that Python is a scripting language, tag it as dynamic" | `hypatia knowledge-create "Python" -d "scripting language" -t "dynamic"` |
+| "log this turn but don't make it searchable by meaning" | `hypatia knowledge-create "msg-42" -d "<turn>" -t "message" --no-embed` |
 
 ### Read
 
@@ -97,8 +132,10 @@ hypatia knowledge-get <name>
 ### Update
 
 ```
-hypatia knowledge-update <name> [-d "<data>"] [-t "<tags>"] [--synonyms "<csv>"] [--figures "<refs>"] [--scopes "<scopes>"]
+hypatia knowledge-update <name> [-d "<data>"] [-t "<tags>"] [--synonyms "<csv>"] [--figures "<refs>"] [--scopes "<scopes>"] [--no-embed | --embed]
 ```
+
+`--no-embed` takes the entry out of the vector index and discards the vector it had; `--embed` puts it back, and it is embedded on the next flush. The two are mutually exclusive. `--embed` does not override the shelf's `embedding.skip_tags`: an entry can ask for less indexing than its shelf, never more.
 
 Only the fields you pass change. An omitted field keeps its stored value, and exactly `""` clears a field, such as `-t ""`; for tags, `","` or `" "` would store blank tags instead. `--scopes` replaces the stored scopes and is parsed as on create: end the list with a comma, such as `"q,"`, to include the global scope, or the entry drops out of global lookups. The entry keeps its `created_at`. Its old vector is discarded, and a new one is generated on the next flush, as after `knowledge-create`. Updating an entry that does not exist is an error. An update that changes nothing prints `Knowledge unchanged: <name>` and writes nothing.
 
@@ -129,8 +166,10 @@ When the user asks to store or remember information, **always create statements 
 **Pattern**: After creating a knowledge entry, identify entities mentioned in the content and create `$triple` relationships between them. At minimum, create one `is_a` statement for every new knowledge entry.
 
 ```
-hypatia statement-create <head> <relation> <tail> -d "<data>"
+hypatia statement-create <head> <relation> <tail> -d "<data>" [--no-embed]
 ```
+
+`--no-embed` works as it does on `knowledge-create`: the triple is still stored and still traversable, but gets no vector. Two differences: statements carry no tags, so a shelf's `embedding.skip_tags` cannot reach them and bulk links must say `--no-embed` themselves; and there is no `statement-update`, so the choice is made once at creation.
 
 ### Triple Extraction Patterns
 
@@ -341,12 +380,16 @@ hypatia search <query> [-c <catalog>] [--limit N] [--offset N]
 Semantic search using embedding vectors. Finds entries with similar meaning, even when keywords don't match.
 
 ```
-hypatia similar <query> [--limit N]
+hypatia similar <query> [--limit N] [-t knowledge|statement|both] [--tags <a,b>] [--exclude-tags <a,b>] [--where '<JSE condition>']
 ```
+
+`--tags` keeps entries carrying at least one of the tags, `--exclude-tags` drops entries carrying any of them, and `--where` takes a JSE condition such as `["$contains", "scopes", "project-a"]` (`$eq`, `$like`, `$contains`, `$and`/`$or`/`$not` and the other filters `$knowledge` takes, but not `$search`, `$similar` or `$k-hop`). They narrow the entries before ranking, so `--limit N` still returns N entries whenever that many qualify. `--exclude-tags message,summary,session` keeps the session-log layer from crowding out the knowledge distilled from it. With the default target `both` the filter applies to statements too, so a condition on `name` needs `-t knowledge`.
 
 Requires an embedding model configured in `shelf.toml` (default: BAAI/bge-m3).
 
 Entries are embedded in batches after they are written or updated. With a remote embedding API, `similar` can miss entries changed in the last minute; `search` finds them at once.
+
+Entries written with `--no-embed`, and entries carrying a tag the shelf lists in `embedding.skip_tags`, are never embedded and so are never `similar` results. `search` and `query` still find them. Each entry keeps the answer it was written with, so after changing `skip_tags` run `hypatia backfill` once to settle what is already stored.
 
 ### Examples
 
@@ -354,6 +397,8 @@ Entries are embedded in batches after they are written or updated. With a remote
 |---|---|
 | "find similar to distributed systems" | `hypatia similar "distributed systems"` |
 | "semantic search for memory management" | `hypatia similar "memory management" --limit 5` |
+| "what do we know about auth, not the chat logs" | `hypatia similar "auth" --exclude-tags message,summary,session` |
+| "rules like this one for project-a" | `hypatia similar "<rule text>" -t knowledge --tags rule --where '["$contains", "scopes", "project-a"]'` |
 
 ## JSE Query Translation
 
@@ -559,15 +604,17 @@ even read-only SQLite needs to create WAL/journal temp files next to the databas
 go straight to the immutable read-only URI, which needs no journal and no directory writes:
 
 ```bash
-sqlite3 "file:$HOME/.hypatia/default/hypatia.sqlite?mode=ro&immutable=1" "SELECT count(*) FROM knowledge;"
+sqlite3 "file:<shelf-dir>/hypatia.sqlite?mode=ro&immutable=1" "SELECT count(*) FROM knowledge;"
 ```
 
 - Use only for **reads** (SELECT). Never write through this path — `immutable=1` tells SQLite the
   file never changes, so writes would corrupt state or be lost.
-- Adjust the shelf path for non-default shelves (`~/.hypatia/<shelf>/<db>.sqlite`).
-- First, locate the actual DB file: `ls ~/.hypatia/*/` (also check `-wal`/`-shm` siblings; if a
-  WAL exists and is non-empty, `immutable=1` may miss recent un-checkpointed rows — in that case
-  prefer requesting wider sandbox permissions for a normal read instead).
+- First, get `<shelf-dir>` from `hypatia list`, which prints the directory each shelf is open at.
+  Do not assume `~/.hypatia/<shelf>/`: any shelf, `default` included, can be registered elsewhere.
+  If the CLI itself cannot run, read the paths from `~/.hypatia/shelves.json`.
+- Then check the `-wal`/`-shm` siblings; if a WAL exists and is non-empty, `immutable=1` may miss
+  recent un-checkpointed rows — in that case prefer requesting wider sandbox permissions for a
+  normal read instead.
 - Schema hints: tables include `knowledge` and `statement`; statement triples are stored in
   `head` / `relation` / `tail` columns.
 

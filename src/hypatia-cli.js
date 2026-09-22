@@ -173,6 +173,56 @@ export function createHypatiaCli(ctx, config) {
   }
 
   /**
+   * What this binary can do beyond the baseline every call relies on.
+   *
+   * Read off `--help`, the one place clap states a flag's existence: an older
+   * binary answers an unknown flag with a usage error (exit 2) *instead of*
+   * running the command, so a write that guessed at `--no-embed` would fail
+   * outright on a binary from before hypatia #26, and a `similar` guessing at
+   * `--exclude-tags` on one from before #35. Both write commands are asked
+   * about `--no-embed` — they gained it together, but the answer is only worth
+   * having if it is true of each command it gates.
+   *
+   * @returns {Promise<{noEmbed: boolean, similarFilters: boolean}>}
+   */
+  async function probeFeatures() {
+    const [knowledge, statement, similar] = await Promise.all([
+      run(['knowledge-create', '--help']),
+      run(['statement-create', '--help']),
+      run(['similar', '--help']),
+    ])
+    for (const result of [knowledge, statement, similar]) {
+      if (result.exitCode !== 0) {
+        throw new HypatiaCliError(`hypatia --help exited ${result.exitCode}`, {
+          code: 'NONZERO_EXIT',
+          stderr: result.stderr.trim().slice(0, 500),
+          exitCode: result.exitCode,
+        })
+      }
+    }
+    return {
+      noEmbed: knowledge.stdout.includes('--no-embed') && statement.stdout.includes('--no-embed'),
+      similarFilters: similar.stdout.includes('--exclude-tags'),
+    }
+  }
+
+  /** The probe's answer, kept for the life of the client; a probe that failed is asked again. */
+  let featuresProbe
+
+  function features() {
+    if (featuresProbe === undefined) {
+      featuresProbe = probeFeatures().catch(() => {
+        // A binary that cannot even print its help fails the next real call
+        // with its own error; the answer here only decides which flags that
+        // call carries, and the conservative answer is none.
+        featuresProbe = undefined
+        return { noEmbed: false, similarFilters: false }
+      })
+    }
+    return featuresProbe
+  }
+
+  /**
    * Whether stdout is hypatia's empty-result sentinel.
    *
    * The sentinel must be the WHOLE output. Testing for the phrase anywhere
@@ -196,6 +246,7 @@ export function createHypatiaCli(ctx, config) {
   return {
     run,
     runOk,
+    features,
 
     /**
      * Read one knowledge entry. Missing entries are a normal result, not an
@@ -211,7 +262,11 @@ export function createHypatiaCli(ctx, config) {
     },
 
     /**
-     * @param {{data: string, tags?: string[], scopes?: string[], shelf?: string}} entry
+     * `embed: false` keeps the entry out of the vector index (hypatia #26); on
+     * a binary without the flag it is dropped, and the entry is embedded as it
+     * always was.
+     *
+     * @param {{data: string, tags?: string[], scopes?: string[], embed?: boolean, shelf?: string}} entry
      * @returns {Promise<boolean>} true when this call created the entry.
      */
     async knowledgeCreate(name, entry) {
@@ -222,11 +277,15 @@ export function createHypatiaCli(ctx, config) {
       if (entry.data) argv.push(`--data=${fitDataArgument(entry.data)}`)
       if (entry.tags && entry.tags.length > 0) argv.push('--tags', entry.tags.join(','))
       if (entry.scopes && entry.scopes.length > 0) argv.push('--scopes', entry.scopes.join(','))
+      if (entry.embed === false && (await features()).noEmbed) argv.push('--no-embed')
       return runCreate(argv)
     },
 
     /**
-     * @param {{data?: string, scopes?: string[], shelf?: string}} [entry]
+     * `embed: false` as on `knowledgeCreate`. A statement has no update
+     * command, so the choice is made once, here.
+     *
+     * @param {{data?: string, scopes?: string[], embed?: boolean, shelf?: string}} [entry]
      * @returns {Promise<boolean>} true when this call created the triple.
      */
     async statementCreate(head, relation, tail, entry = {}) {
@@ -239,6 +298,7 @@ export function createHypatiaCli(ctx, config) {
       // expose to clap's flag parsing.
       if (entry.data) argv.push(`--data=${fitDataArgument(entry.data)}`)
       if (entry.scopes && entry.scopes.length > 0) argv.push('--scopes', entry.scopes.join(','))
+      if (entry.embed === false && (await features()).noEmbed) argv.push('--no-embed')
       return runCreate(argv)
     },
 
@@ -258,10 +318,18 @@ export function createHypatiaCli(ctx, config) {
     /**
      * Vector-similarity search — the recall path's primary ranking tool.
      * NOTE the flag is `-t/--target` (unlike keyword search's `-c`).
+     *
+     * `excludeTags` leaves entries carrying any of those tags out BEFORE the
+     * ranking (hypatia #35), so `limit` rows come back whenever that many
+     * qualify. A binary without the flag ranks everything; the caller reads
+     * `features()` to know whether it must over-fetch and filter instead.
+     *
      * @returns {Promise<any[]>}
      */
-    async similar(query, { target = 'knowledge', limit = 5, shelf = shelfOf() } = {}) {
-      const { stdout } = await runOk(['similar', query, '-t', target, '--limit', String(limit), '--shelf', shelf])
+    async similar(query, { target = 'knowledge', limit = 5, shelf = shelfOf(), excludeTags = [] } = {}) {
+      const argv = ['similar', query, '-t', target, '--limit', String(limit), '--shelf', shelf]
+      if (excludeTags.length > 0 && (await features()).similarFilters) argv.push('--exclude-tags', excludeTags.join(','))
+      const { stdout } = await runOk(argv)
       if (isEmptyResult(stdout)) return []
       const parsed = parseJson(stdout, 'similar')
       return Array.isArray(parsed) ? parsed : []
