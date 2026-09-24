@@ -269,7 +269,7 @@ hypatia-auto-memory:
     enabled: true
     maxAssistantChars: 8000      # per-message cap before truncation marker
     maxUserChars: 32000          # same, for what the user typed or pasted
-    toolLedger: true             # collapse repeated tool calls
+    toolLedger: false            # off by default; true records a compact tool-call ledger
   consolidation:
     enabled: true
     # Each attempt, including a retry, rotates to the next selected route.
