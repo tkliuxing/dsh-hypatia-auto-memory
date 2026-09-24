@@ -21,7 +21,7 @@
 
 import { createHash } from 'node:crypto'
 
-import { PLUGIN_NAME } from './consolidator.js'
+import { PLUGIN_NAME, outputBudget } from './consolidator.js'
 import { NULL_MODEL_LOG } from './model-log.js'
 
 /** Tag marking the tier an entry belongs to. */
@@ -111,7 +111,14 @@ export function createCascade({ cli, llm, selectRoute, getConfig, status, modelL
           content: [{ type: 'text', text: `${archiveInstruction(level, rows.length)}\n\n${body}` }],
           source: { kind: 'plugin', plugin: PLUGIN_NAME },
         })],
-        maxTokens: getConfig().consolidation.maxOutputTokens,
+        // Thinking stays ON here, unlike the extraction call: an archive is a
+        // semantic compression of sixteen summaries, not a mechanical transform
+        // into a fixed shape, and reasoning plausibly earns its cost. What it
+        // must not do is share a cap sized for the answer alone, so the budget
+        // carries the thinking allowance. (This call fails SOFT — a truncated
+        // archive just returns undefined and the tier is retried by the next
+        // batch — which is why the permanent-failure path never applied to it.)
+        maxTokens: outputBudget(getConfig().consolidation.maxOutputTokens, false),
         purpose: 'memory-cascade',
         signal: controller.signal,
       })) {

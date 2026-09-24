@@ -37,6 +37,17 @@ const GIT_LOCATION_VARS = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR']
 /** How long one `git rev-parse` may take before the cwd's own name is used. */
 const GIT_TIMEOUT_MS = 3000
 
+/**
+ * How long a closing session's final log write may take before shutdown moves
+ * on without it.
+ *
+ * Only the log path is waited for: a hypatia write is milliseconds, while the
+ * consolidation it may trigger is a model call measured in tens of seconds and
+ * can never fit inside DSH's 5 s shutdown budget (see `process-shutdown.ts`).
+ * Whatever misses this window stays durable and is resumed by the next start.
+ */
+const CLOSING_LOG_DRAIN_MS = 2000
+
 /** `process.env` without {@link GIT_LOCATION_VARS}. */
 function gitEnv() {
   const env = { ...process.env }
@@ -247,15 +258,19 @@ export function createCollector({ ctx, queue, progress, getConfig, status, onTur
    * The lower bound is the watermark rather than any particular event, so the
    * span is whole by construction — including messages the loop appended before
    * the first `step/start` of the turn.
+   *
+   * @returns {Promise<boolean>} true when a range was durable enough to be worth
+   *   waiting for; false when the watermark already covers `toSeq`.
    */
   async function enqueueUnlogged(session, toSeq, { immediate = false } = {}) {
     const id = sessionIdOf(session)
     const current = progress.get(id) ?? EMPTY_PROGRESS
     // A forked child must not re-log the prefix it inherited from its parent.
     const fromSeq = Math.max(current.lastLoggedSeq, session.inheritedEventCount ?? 0)
-    if (toSeq <= fromSeq) return
+    if (toSeq <= fromSeq) return false
     const project = await projectFor(session)
     await queue.enqueue({ kind: 'log-message', sessionId: id, fromSeq, toSeq, project, immediate })
+    return true
   }
 
   /** Enqueue creation of the `session-<id>` node from the summary at `seq`. */
@@ -357,6 +372,30 @@ export function createCollector({ ctx, queue, progress, getConfig, status, onTur
   // ---- session close ------------------------------------------------------------
 
   /**
+   * Persist everything one closing session still owes.
+   *
+   * Two ranges, each derived from the DURABLE watermarks rather than from what
+   * happened to be in memory: the log the last flush never reached, and the
+   * consolidation the turn/token thresholds never released. Both become task
+   * records before anything else is awaited, which is the point — a
+   * `session/disposed` observer is fire-and-forget in DSH, the process may be
+   * gone milliseconds later, and only a durable record is resumed by the next
+   * start (`resumeKind` re-schedules `pending` and crash-left `running` rows).
+   * A range that exists only in memory is lost; that was the whole bug.
+   *
+   * @param {any} session
+   * @returns {Promise<{logged: boolean, consolidated: boolean}>}
+   */
+  async function enqueueOwed(session) {
+    // Log first, so the per-session chain runs it before the consolidation that
+    // reads the same span.
+    const logged = await enqueueUnlogged(session, session.seq ?? 0, { immediate: true })
+    if (onSessionEnd === undefined) return { logged, consolidated: false }
+    const consolidated = await onSessionEnd(sessionIdOf(session), session)
+    return { logged, consolidated: consolidated === true }
+  }
+
+  /**
    * Final flush and consolidation for a session that is going away.
    *
    * DSH has no `session/end` LOG event; `session/disposed` is the only close
@@ -365,15 +404,23 @@ export function createCollector({ ctx, queue, progress, getConfig, status, onTur
    * thresholds (`checkEveryTurns`, `minNewTokens`) are pacing knobs for a live
    * conversation, and a task that finishes under both of them would otherwise
    * be logged and never extracted.
+   *
+   * @param {any} session
+   * @param {{drain?: 'idle' | 'log' | 'none'}} [options] `idle` waits for the
+   *   whole session (a close while the profile keeps running); `log` waits only
+   *   for the final writes (shutdown, where a model call cannot finish); `none`
+   *   persists and returns.
    */
-  async function finishSession(session) {
+  async function finishSession(session, { drain = 'idle' } = {}) {
     const id = sessionIdOf(session)
     if (id === '') return
     detached.set(id, session)
     try {
-      await enqueueUnlogged(session, session.seq ?? 0, { immediate: true })
-      if (onSessionEnd !== undefined) await onSessionEnd(id, session)
-      const drained = await queue.whenIdle(id)
+      await enqueueOwed(session)
+      if (drain === 'none') return
+      const drained = drain === 'log'
+        ? await queue.whenTaskSettled('log-message', id, { timeoutMs: CLOSING_LOG_DRAIN_MS })
+        : await queue.whenIdle(id)
       if (!drained) status.warn(`session ${id} still had queued work when its grace period expired`)
     } catch (error) {
       status.error('session-end consolidation failed', error)
@@ -386,6 +433,57 @@ export function createCollector({ ctx, queue, progress, getConfig, status, onTur
     if (getConfig().collector?.enabled === false) return
     void finishSession(session)
   })
+
+  /**
+   * Persist the closing tail of every session still open when this collector is
+   * being torn down.
+   *
+   * The listener above covers a session the user closes while the profile keeps
+   * running. It cannot cover shutdown: the collect fiber is disposed before the
+   * session store releases its sessions, so the event has not fired yet, and the
+   * queue dies with the fiber — `enqueue` after `queue.dispose()` is a silent
+   * no-op, which is how an entire run's tails were dropped. This sweep is
+   * registered AFTER the queue's own disposer in index.js, and cordis disposes a
+   * fiber's effects in reverse registration order, so it runs while the queue can
+   * still accept (and persist) work.
+   *
+   * Persisting is the guarantee; finishing is best effort. The model call is
+   * left to the queue and, in practice, to the next start. Only the log write is
+   * waited for, because a hypatia write is milliseconds and a model call never
+   * fits the shutdown budget.
+   *
+   * @param {{timeoutMs?: number}} [options]
+   * @returns {Promise<number>} how many sessions had something to persist.
+   */
+  async function finalizeLiveSessions({ timeoutMs = CLOSING_LOG_DRAIN_MS } = {}) {
+    /** @type {Map<string, any>} */
+    const closing = new Map()
+    for (const session of ctx.sessions?.list?.() ?? []) closing.set(sessionIdOf(session), session)
+    // A session whose `session/disposed` already fired is either mid-drain or
+    // done; re-enqueueing its ranges is idempotent (same task ids, coalesced
+    // range), so including it cannot duplicate work.
+    for (const [id, session] of detached) if (!closing.has(id)) closing.set(id, session)
+    if (closing.size === 0) return 0
+
+    /** @type {string[]} */
+    const logging = []
+    for (const [id, session] of closing) {
+      try {
+        const owed = await enqueueOwed(session)
+        if (owed.logged) logging.push(id)
+      } catch (error) {
+        status.error('session-end consolidation failed', error)
+      }
+    }
+    if (logging.length > 0) {
+      status.info(`persisted the closing tail of ${logging.length} session(s); a consolidation that cannot finish here resumes at the next start`)
+      // Parallel, one shared budget, and chain-free: `whenTaskSettled` watches
+      // the log record only, so the consolidation it queued behind cannot hold
+      // the drain past the deadline.
+      await Promise.all(logging.map((id) => queue.whenTaskSettled('log-message', id, { timeoutMs })))
+    }
+    return logging.length
+  }
 
   // ---- session (re)open -----------------------------------------------------------
 
@@ -428,6 +526,7 @@ export function createCollector({ ctx, queue, progress, getConfig, status, onTur
 
   return {
     backfillLiveSessions,
+    finalizeLiveSessions,
     projectFor,
     // Startup housekeeping resolves a scope from a persisted session header's
     // cwd, with no Session to hand — `projectFor` needs one, and caches by its

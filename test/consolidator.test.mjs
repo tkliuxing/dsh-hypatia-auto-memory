@@ -7,8 +7,10 @@ import {
   buildTranscript,
   consolidationStart,
   createConsolidator,
+  outputBudget,
   parseConsolidationOutput,
   PermanentConsolidationError,
+  THINKING_OUTPUT_ALLOWANCE,
 } from '../src/consolidator.js'
 import { createWriter } from '../src/writer.js'
 import { TaskDeferredError } from '../src/queue.js'
@@ -230,7 +232,7 @@ test('onTurnEnd retains the checkpoint while consolidation is disabled', async (
 })
 
 /** Minimal doubles for a full `execute` run. */
-function makeExecuteHarness({ events, maxInputTokens, inherited = 0, modelLog, finishKind = 'stop', finishFailure, replyText }) {
+function makeExecuteHarness({ events, maxInputTokens, inherited = 0, modelLog, finishKind = 'stop', finishFailure, replyText, reasoningEfforts }) {
   const progressMap = new Map()
   const progress = {
     get: (k) => progressMap.get(k),
@@ -248,9 +250,18 @@ function makeExecuteHarness({ events, maxInputTokens, inherited = 0, modelLog, f
     count: () => {}, markConsolidated: () => {},
   }
   const prompts = []
+  const requests = []
   const llm = {
+    // Absent unless a test declares it: an adapter that cannot be asked about
+    // its reasoning support keeps the pre-existing behavior.
+    ...reasoningEfforts === undefined ? {} : {
+      async resolveModelInfo() {
+        return { reasoning: { efforts: reasoningEfforts.map((id) => ({ id })) } }
+      },
+    },
     async *stream(request) {
       prompts.push(request.messages[0].content[0].text)
+      requests.push(request)
       const payload = replyText ?? JSON.stringify({ summary: '- did things', workUnits: [] })
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: payload }
@@ -294,7 +305,7 @@ function makeExecuteHarness({ events, maxInputTokens, inherited = 0, modelLog, f
     modelLog,
     projectFor: async () => 'demo',
   })
-  return { consolidator, progressMap, written, prompts, enqueued }
+  return { consolidator, progressMap, written, prompts, requests, enqueued }
 }
 
 test('execute advances the watermark only over the span it actually consolidated', async () => {
@@ -367,12 +378,78 @@ test('a model call that ends without usable output is recorded as incomplete', a
 
   await assert.rejects(
     h.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 2, project: 'demo' }),
-    PermanentConsolidationError,
+    /consolidation hit the output token cap/,
   )
   assert.deepEqual(modelLog.attempts.map((a) => [a.purpose, ...a.done]), [
     ['memory-consolidation', 'incomplete', 'max-tokens'],
   ])
   assert.deepEqual(h.written.knowledge, [], 'no summary is stored for an unusable reply')
+})
+
+test('a truncation is retryable, not permanent', async () => {
+  // Classifying it permanent is how one bad ask stranded a whole session: the
+  // queue refused every retry, and a range below the token floor had no other
+  // path back in. The retry is a different ask — fewer units, and no reasoning
+  // where the route allows it — so it is worth making.
+  const events = [
+    ev('user/message', 0, { source: { kind: 'user' }, content: [{ type: 'text', text: 'do the thing' }] }),
+    ev('assistant/message', 1, { turn: 1, message: { content: [{ type: 'text', text: 'done' }] } }),
+  ]
+  const h = makeExecuteHarness({ events, maxInputTokens: 10_000, modelLog: makeModelLogDouble(), finishKind: 'max-tokens' })
+
+  const error = await h.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 2, project: 'demo' })
+    .then(() => undefined, (thrown) => thrown)
+
+  assert.ok(error instanceof Error)
+  assert.notEqual(error.permanent, true, 'the queue must be allowed to retry it')
+})
+
+test('a route that can stop thinking is asked to, at the configured cap', async () => {
+  const events = [
+    ev('user/message', 0, { source: { kind: 'user' }, content: [{ type: 'text', text: 'do the thing' }] }),
+    ev('assistant/message', 1, { turn: 1, message: { content: [{ type: 'text', text: 'done' }] } }),
+  ]
+  const h = makeExecuteHarness({
+    events, maxInputTokens: 10_000, modelLog: makeModelLogDouble(),
+    reasoningEfforts: ['off', 'high'],
+  })
+
+  await h.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 2, project: 'demo' })
+
+  assert.equal(h.requests[0].reasoningEffort, 'off', 'extraction is mechanical; thinking only spends the cap')
+  assert.equal(h.requests[0].maxTokens, 2000, 'no allowance is needed once reasoning is off')
+})
+
+test('a route that cannot stop thinking pays for it in the cap', async () => {
+  const events = [
+    ev('user/message', 0, { source: { kind: 'user' }, content: [{ type: 'text', text: 'do the thing' }] }),
+    ev('assistant/message', 1, { turn: 1, message: { content: [{ type: 'text', text: 'done' }] } }),
+  ]
+  const h = makeExecuteHarness({ events, maxInputTokens: 10_000, modelLog: makeModelLogDouble() })
+
+  await h.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 2, project: 'demo' })
+
+  assert.equal(h.requests[0].reasoningEffort, undefined, 'a route that never advertised `off` is not asked for it')
+  assert.equal(h.requests[0].maxTokens, 2000 + THINKING_OUTPUT_ALLOWANCE,
+    'thinking shares the cap, so a cap sized for the answer alone truncates the answer')
+  assert.equal(outputBudget(2000, true), 2000, 'the allowance applies only where thinking may run')
+})
+
+test('a retry asks for a single work unit', async () => {
+  // The units are what make the reply long, and a truncated run stored none of
+  // them — so the retry trades them for a summary that fits.
+  const events = [
+    ev('user/message', 0, { source: { kind: 'user' }, content: [{ type: 'text', text: 'do the thing' }] }),
+    ev('assistant/message', 1, { turn: 1, message: { content: [{ type: 'text', text: 'done' }] } }),
+  ]
+  const first = makeExecuteHarness({ events, maxInputTokens: 10_000, modelLog: makeModelLogDouble() })
+  const retry = makeExecuteHarness({ events, maxInputTokens: 10_000, modelLog: makeModelLogDouble() })
+
+  await first.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 2, project: 'demo', attempts: 0 })
+  await retry.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 2, project: 'demo', attempts: 1 })
+
+  assert.match(first.prompts[0], /At most 3 work units/)
+  assert.match(retry.prompts[0], /At most 1 work units/)
 })
 
 test('an aborted call keeps the provider reason in the error it throws', async () => {

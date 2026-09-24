@@ -45,7 +45,7 @@ import { createRecall } from './recall.js'
 import { createPersistedSessions } from './persisted-session.js'
 import { createAutoApprove } from './auto-approve.js'
 import { registerSkills } from './skills.js'
-import { backfillConsolidation, normalizeTaskProjects, pruneVanishedSessions, reconcileProgress } from './housekeeping.js'
+import { backfillConsolidation, normalizeTaskProjects, pruneVanishedSessions, reconcileProgress, sessionDirectory } from './housekeeping.js'
 import { shelfTable } from './shelf.js'
 
 export const name = 'dsh-hypatia-auto-memory'
@@ -296,6 +296,14 @@ function applyCollect(ctx, configHandle, status) {
         : shared.consolidator.onSessionEnd(sessionId, session),
     })
 
+    // Persist every open session's closing tail before the queue stops taking
+    // work. Registered AFTER the queue/CLI disposer above on purpose: cordis
+    // disposes a fiber's effects in reverse registration order, so this runs
+    // first, while `queue.enqueue` is still a durable write rather than the
+    // silent no-op it becomes once `dispose()` has set the flag. See
+    // `finalizeLiveSessions` for why the model call is not waited for.
+    ctx.effect(() => () => collector.finalizeLiveSessions(), `${name}: persist closing tails`)
+
     // Live store first, storage second. `session/created` — the signal that
     // wakes a deferred task — fires only where an agent runs, so a finished
     // session (and every subagent session) may never emit it again; storage
@@ -441,13 +449,11 @@ function applyCollect(ctx, configHandle, status) {
         inject: ['sessionPersistence'],
         apply: (c) => {
           void (async () => {
-            const headers = await c.sessionPersistence.list()
-            const cwdById = new Map()
-            for (const header of headers) {
-              const id = String(header?.id ?? '')
-              if (id !== '' && header?.cwd !== undefined) cwdById.set(id, String(header.cwd))
-            }
-            const knownSessionIds = new Set(headers.map((header) => String(header?.id ?? '')).filter((id) => id !== ''))
+            // Consumed in one tested place: `list()` yields snapshots wrapping a
+            // `header`, and reading `id`/`cwd` off the snapshot left every
+            // session unresolved — see sessionDirectory.
+            const snapshots = await c.sessionPersistence.list()
+            const { cwdById, knownSessionIds } = sessionDirectory(snapshots)
             if (housekeeping.pruneVanishedSessions !== false) {
               await pruneVanishedSessions({
                 progress: state.progress,
@@ -464,7 +470,7 @@ function applyCollect(ctx, configHandle, status) {
                 queue,
                 cwdFor: (id) => cwdById.get(id),
                 projectForCwd: collector.projectForCwd,
-                minNewTokens: configHandle.get().consolidation.minNewTokens,
+                perScopeLimit: housekeeping.consolidationBackfillPerScope,
                 status,
               })
             }

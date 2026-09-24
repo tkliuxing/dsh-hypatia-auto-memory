@@ -95,9 +95,15 @@ export const DEFAULTS = {
     pruneVanishedSessions: true,
     // Consolidate a logged tail the in-session trigger never reached. A process
     // restart takes the session-end path with it, so a short session would
-    // otherwise stay logged-but-never-distilled. Gated by the same
-    // `consolidation.minNewTokens` floor, read from the progress row.
+    // otherwise stay logged-but-never-distilled. This pass ignores the live
+    // trigger's `minNewTokens` floor on purpose — at boot there is no later turn
+    // to wait for, and a tail skipped here is skipped for good — and bounds its
+    // cost with `consolidationBackfillPerScope` instead.
     backfillConsolidation: true,
+    // Sessions whose tail this one pass may queue, per project scope, per start.
+    // The cap is what replaces the floor: a large backlog drains over several
+    // starts, each spending at most this many model calls per scope.
+    consolidationBackfillPerScope: 4,
   },
   // Cordis-level packaging knobs (not shown on the settings tab): whether to
   // register the bundled skills, and where they live.
@@ -172,6 +178,8 @@ export const Config = z.object({
     reconcileOnStartup: z.boolean().default(DEFAULTS.housekeeping.reconcileOnStartup),
     pruneVanishedSessions: z.boolean().default(DEFAULTS.housekeeping.pruneVanishedSessions),
     backfillConsolidation: z.boolean().default(DEFAULTS.housekeeping.backfillConsolidation),
+    consolidationBackfillPerScope: z.number().step(1).min(1).max(64)
+      .default(DEFAULTS.housekeeping.consolidationBackfillPerScope),
   }).default(DEFAULTS.housekeeping).volatile(),
   skills: z.boolean().default(DEFAULTS.skills),
   skillsDir: z.string(),

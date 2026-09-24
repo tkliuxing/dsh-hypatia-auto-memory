@@ -229,12 +229,15 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
           return
         }
         // Permanent failures (e.g. malformed model output) get no retries —
-        // re-running an unhealable task only wedges the session chain.
-        const attempts = error?.permanent === true
-          ? getConfig().maxAttempts
-          : (tasks.get(id)?.attempts ?? record.attempts) + 1
+        // re-running an unhealable task only wedges the session chain. They are
+        // refused by the branch below, NOT by inflating the stored count:
+        // `attempts` is how many times this task actually ran, and the Memory
+        // tab renders it as such. Writing `maxAttempts` here made a task that
+        // ran exactly once report "failed 3 times" (the truncation case, see
+        // consolidator.js), which is a lie a reader cannot detect.
+        const attempts = (tasks.get(id)?.attempts ?? record.attempts) + 1
         const config = getConfig()
-        if (attempts < config.maxAttempts) {
+        if (error?.permanent !== true && attempts < config.maxAttempts) {
           await tasks.update(id, (t) => ({
             ...t,
             status: 'pending',
@@ -441,6 +444,36 @@ export function createQueue({ tasks, getConfig, executors = {}, status, now = Da
         await new Promise((resolve) => setTimeout(resolve, 50))
       }
       return false
+    },
+
+    /**
+     * Resolve once one task has left the table, WITHOUT waiting on its
+     * session's chain.
+     *
+     * `whenIdle` awaits the chain, which is right when a session's whole
+     * workload must finish before its object is released — but wrong at
+     * shutdown, where a consolidation (a model call, tens of seconds) queued
+     * behind the final log write would hold the wait for minutes and outlive the
+     * process's own grace. This looks only at the record, so a caller can give
+     * the writes a bounded window and leave everything else durable.
+     *
+     * @param {string} kind - task kind whose record to watch.
+     * @param {string} sessionId
+     * @param {{timeoutMs?: number}} [options]
+     * @returns {Promise<boolean>} true once the record is gone, failed or
+     *   deferred; false when the deadline passed with it still outstanding.
+     */
+    async whenTaskSettled(kind, sessionId, { timeoutMs = 5000 } = {}) {
+      const deadline = now() + timeoutMs
+      const id = taskId(kind, sessionId)
+      for (;;) {
+        const record = tasks.get(id)
+        // Deferred work cannot run until its session is back, so it is not
+        // something to wait for here either.
+        if (record === undefined || record.status === 'failed' || record.status === 'deferred') return true
+        if (now() >= deadline) return false
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
     },
 
     pendingCount() {

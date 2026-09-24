@@ -122,21 +122,26 @@ test('retries transient failures then succeeds', async () => {
   assert.equal(table.dump().length, 0)
 })
 
-test('permanent failures skip retries and stay failed', async () => {
+test('permanent failures skip retries, stay failed, and report the attempts made', async () => {
   const err = new Error('bad output')
   err.permanent = true
+  let ran = 0
   const table = makeTable()
   const queue = createQueue({
     tasks: table,
     getConfig: () => CONFIG,
-    executors: { consolidate: async () => { throw err } },
+    executors: { consolidate: async () => { ran += 1; throw err } },
     status: makeStatus(),
   })
   await queue.enqueue({ kind: 'consolidate', sessionId: 'a', fromSeq: 0, toSeq: 5, project: 'p' })
   await new Promise((r) => setTimeout(r, 50))
   const record = table.get('consolidate:a')
   assert.equal(record.status, 'failed')
-  assert.equal(record.attempts, CONFIG.maxAttempts)
+  assert.equal(ran, 1, 'no retry was attempted')
+  // The stored count is what actually happened, not `maxAttempts`: writing the
+  // cap here made a task that ran exactly once report "failed 3 times" in the
+  // Memory tab, and a reader has no way to tell that from a real third attempt.
+  assert.equal(record.attempts, 1)
   assert.ok(record.error.includes('bad output'))
 })
 

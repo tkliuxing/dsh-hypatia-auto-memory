@@ -83,7 +83,10 @@ session/event (emit)
   │                 └─ cascade      ──▶ $not-summaried ──▶ sum<N>-* (summary N)
   └─ session/title | compaction/summary ──▶ session-node ──▶ session-<sid> + belongTo
 session/disposed ──▶ final flush + consolidation, thresholds waived (DSH 仍在运行时
-                     关闭的会话；进程重启则由启动时的 consolidation backfill 覆盖)
+                     关闭的会话)
+collect fiber 拆除 ──▶ 对每个仍打开的会话做同样的收尾，并在队列停止前落盘；模型
+                     调用留到下次启动完成（重启、配置变更重启，或崩溃：启动时的
+                     consolidation backfill）
 agent/session-start ──▶ rules/taboos inject()
 ```
 
@@ -151,6 +154,15 @@ agent/session-start ──▶ rules/taboos inject()
   脱敏并绝对化日期，超预算的 span 只巩固其**最旧**的条目，水位也只推进到那里，剩下
   的不会被打成已完成。
 
+  抽取调用在**声明支持的路由上关闭推理**。抽取是朝固定 JSON 形状的机械变换，而在开启
+  thinking 的路由上，推理与答案**共享同一个 `maxOutputTokens`**：实测中一条解析为
+  `high` 的 `deepseek-flash` 路由在 2000 的预算里花掉约 800–1400 思考，然后带着写到
+  一半的 JSON 撞上 `max-tokens`（9.3s，而同一条路由上同类成功调用要 25s）。路由无法
+  被要求关闭（或 provider 忽略该控制）时，预算改为携带固定的思考余量；而**截断不再
+  算永久失败**，而是重试——重试时只要 1 个工作单元而不是 `maxWorkUnitsPerRun`，因为
+  正是工作单元让回复变长。Cascade 是例外：它保留 thinking（它是在压缩十六条摘要，不是
+  在填一个形状），并用同一份余量来支付。
+
 - **Cascade** 把十六个未归档的 tier-N 摘要归档为一条 tier-(N+1) 条目，用 hypatia 自带
   的 `$not-summaried`（它对 `statement.tail` 做反连接并按 `created_at ASC` 排序，
   免费得到 FIFO 分批）。这就是协议的 log₁₆(n) 归档：每一层只压缩上一层已经蒸馏过的
@@ -168,12 +180,23 @@ agent/session-start ──▶ rules/taboos inject()
   DSH 已不存在的会话的行和任务。重置的代价是一次重新记录和一次重新巩固，所以两遍
   都只在有正面证据时才行动：shelf 查询失败或空的会话列表都不做任何改动。
 
-  第三遍巩固那些被重启打断的内容。session-end 触发器活不过重启：DSH 在关闭时跑它的
-  关闭路径（追加 `session/end-seed`），但那里排入的任何东西在进程消失前都来不及
-  持久化——实测在一次真实重启中，storage 文件根本没写，会话回来时
-  `lastConsolidatedSeq: 0`。所以一个有已记录但从未巩固的尾部的行，会在下次启动时被
-  排入队列，受同样的 `consolidation.minNewTokens` 下限约束，并且从行里读取而不是
-  加载会话。没有这道门槛，每次重启都会为每个带尾部的会话花一次模型调用。
+  第三遍巩固那些关闭时只能落盘、以及崩溃或 `kill -9` 完全没留下的内容。关闭中的会话
+  所欠的东西本身活不下来：DSH 里 `session/disposed` 的观察者是 fire-and-forget，
+  collect fiber 先于 session store 释放会话就被拆除，而队列随 fiber 一起消失——所以在
+  那里 `enqueue` 是一次静默的空操作，一整轮的尾巴就这么丢了。两件事修好了它：collect
+  fiber 的 disposer 现在会为每个仍打开的会话**落盘**两段范围（把收尾 effect 注册在队列
+  自己的 disposer **之后**，因为 cordis 按注册逆序拆除 fiber 的 effects，于是它跑的时候
+  队列还能写），而这一遍在下一次启动把活干完。关闭时只等最后的日志写入：一次 hypatia
+  写入是毫秒级，而它可能触发的模型调用是几十秒，永远塞不进 DSH 5s 的关机预算。
+
+  这一遍**刻意不看**节流实时触发器的 `consolidation.minNewTokens` 下限。对话还在进行时
+  下限是对的——总还有下一轮——但启动时没有下一轮，在这里被跳过的尾部就是永久跳过：
+  实测一个 live shelf 上 15 个会话带着 1–1950 的 pending token，没有一个被巩固过，9 个
+  有消息的会话里 8 个 `lastConsolidatedSeq: 0`。成本改由
+  `housekeeping.consolidationBackfillPerScope` 封顶——每次启动**每个 project scope**
+  最多这么多个会话，尾巴最大的优先，于是积压分几次启动消化，而不是一次爆出无界的模型
+  调用。consolidate 记录处于 `failed` 的范围无论多小都优先：`resumeKind` 不会重排
+  failed 行，重新入队是它唯一的回头路。
 
   这些任务随后从 **storage** 读取事件，而不只是从活 store。`session/created`——唤醒
   被延迟任务的信号——只在 Agent 实际运行的地方触发，所以一个已结束的会话可能再也不
@@ -294,6 +317,7 @@ hypatia-auto-memory:
     reconcileOnStartup: true     # 重置 session 在 shelf 里已无 msg-* 的行
     pruneVanishedSessions: true  # 删除 DSH 已不存在的会话的行和任务
     backfillConsolidation: true  # 巩固会话内触发器从未到达的已记录尾部
+    consolidationBackfillPerScope: 4  # 每次启动每个 scope 允许排入的会话数
 ```
 
 bundle 行上的 cordis config 块只承载技能打包：

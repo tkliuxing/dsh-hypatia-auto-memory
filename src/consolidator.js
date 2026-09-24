@@ -45,6 +45,32 @@ export const ADJUDICATION_MAX_TOKENS = 1024
  */
 export const ADJUDICATION_REASONING_EFFORT = 'off'
 
+/**
+ * Answer-side headroom added when a route cannot be asked to stop thinking.
+ *
+ * An extraction call asks for a summary plus a bounded number of work units —
+ * measured on a live shelf, ~93 tokens for a summary and ~600–1200 for three
+ * units — so the default `maxOutputTokens: 2000` has little slack once reasoning
+ * shares the cap. A `deepseek-flash` route resolving to `high` spent roughly
+ * 800–1400 tokens thinking before writing anything, then hit `max-tokens` with
+ * the JSON half emitted (9.3 s, against 25 s for a completed run of the same
+ * kind on that route). Asking for `off` is the fix; this allowance is what keeps
+ * a route that cannot honour it — or a provider that ignores the control — from
+ * truncating the answer instead of the reasoning.
+ */
+export const THINKING_OUTPUT_ALLOWANCE = 4000
+
+/**
+ * Output cap for one extraction call.
+ *
+ * @param {number} configuredTokens - the configured `maxOutputTokens`.
+ * @param {boolean} thinkingOff - whether the call asked the route for no reasoning.
+ * @returns {number} the cap to send.
+ */
+export function outputBudget(configuredTokens, thinkingOff) {
+  return thinkingOff ? configuredTokens : configuredTokens + THINKING_OUTPUT_ALLOWANCE
+}
+
 /** Distinguishes permanent failures (no retry value) from transient ones. */
 export class PermanentConsolidationError extends Error {
   constructor(message) {
@@ -576,6 +602,12 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
     const attempt = modelLog.begin('memory-consolidation', route)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), consolidation.timeoutMs)
+    // A retry is normally recovering from a truncated reply, and the work units
+    // are what make the reply long: one summary is ~93 tokens while three
+    // structured units are several hundred. Asking for a single unit from the
+    // second attempt on keeps the part that matters — the span summary — inside
+    // any budget, and costs at most the units a failed run never stored anyway.
+    const maxUnits = task.attempts > 0 ? 1 : consolidation.maxWorkUnitsPerRun
     let outcome = 'incomplete'
     let detail = ''
     let parsedOutput
@@ -585,15 +617,24 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
         const { createUserMessage, BlockAssembler } = await import('@deepseek-ai/dsh-llm')
         const assembler = new BlockAssembler()
         const request = createUserMessage({
-          content: [{ type: 'text', text: `${consolidationInstruction(consolidation.maxWorkUnitsPerRun)}\n\n<transcript>\n${transcript}\n</transcript>` }],
+          content: [{ type: 'text', text: `${consolidationInstruction(maxUnits)}\n\n<transcript>\n${transcript}\n</transcript>` }],
           source: { kind: 'plugin', plugin: PLUGIN_NAME },
         })
+        // Thinking off, exactly as the adjudication call above: extraction is a
+        // mechanical transform into a fixed JSON shape, and a thinking route
+        // spends the SAME `maxOutputTokens` cap on its reasoning as on the JSON
+        // it is asked to emit. With the cap left to the route's default
+        // (`high`), a long span hits `max-tokens` with the JSON half-written —
+        // observed live: 9s to `max-tokens` where a completed run of the same
+        // kind took 25s, i.e. the budget went to reasoning, not to content.
+        const skipThinking = await canDisableThinking(route, controller.signal)
         for await (const chunk of llm.stream({
           provider: route.provider,
           model: route.model,
           system: 'You produce strict JSON only. You never add prose around it.',
           messages: [request],
-          maxTokens: consolidation.maxOutputTokens,
+          maxTokens: outputBudget(consolidation.maxOutputTokens, skipThinking),
+          ...skipThinking ? { reasoningEffort: ADJUDICATION_REASONING_EFFORT } : {},
           purpose: 'memory-consolidation',
           signal: controller.signal,
         })) {
@@ -621,8 +662,15 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
           : finish.kind
         if (finish.kind === 'error') outcome = 'error'
         detail = String(message)
+        // A truncation is RETRYABLE, unlike an unparseable reply. It says the
+        // route could not fit thinking plus the answer into the cap, and the
+        // retry is a different ask: fewer work units (above) and, when the route
+        // honours it, no reasoning at all. Classifying it permanent is how a
+        // single bad ask used to strand a whole session's logged range — the
+        // queue refused every retry, and the range below the token floor had no
+        // other path back in.
         throw finish.kind === 'max-tokens'
-          ? new PermanentConsolidationError('consolidation hit the output token cap (truncated JSON)')
+          ? new Error('consolidation hit the output token cap (truncated JSON)')
           : new Error(`consolidation model call failed: ${message}`)
       }
       const text = assembled.blocks()

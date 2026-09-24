@@ -96,8 +96,11 @@ session/event (emit)
   │                 └─ cascade      ──▶ $not-summaried ──▶ sum<N>-* (summary N)
   └─ session/title | compaction/summary ──▶ session-node ──▶ session-<sid> + belongTo
 session/disposed ──▶ final flush + consolidation, thresholds waived (a session
-                     closed while DSH keeps running; a restart is covered by the
-                     startup consolidation backfill instead)
+                     closed while DSH keeps running)
+collect fiber dispose ──▶ the same flush for every session still open, persisted
+                     before the queue stops; the model call finishes at the next start
+                     (a restart, a config-change restart, or a crash: the startup
+                     consolidation backfill)
 agent/session-start ──▶ rules/taboos inject()
 ```
 
@@ -189,6 +192,19 @@ agent/session-start ──▶ rules/taboos inject()
   and advances the watermark only that far, so the remainder is not silently
   marked done.
 
+  The extraction call asks for **no reasoning** on a route that advertises it.
+  Extraction is a mechanical transform into a fixed JSON shape, and on a
+  thinking route the reasoning is charged to the SAME `maxOutputTokens` as the
+  answer: measured live, a `deepseek-flash` route resolving to `high` spent
+  ~800–1400 of a 2000-token cap thinking and hit `max-tokens` with the JSON half
+  written (9.3 s, against 25 s for a completed run of the same kind on that
+  route). Where a route cannot be asked — or a provider ignores the control —
+  the budget carries a fixed thinking allowance instead, and a truncation is
+  **retried** rather than declared permanent: the retry asks for one work unit
+  instead of `maxWorkUnitsPerRun`, because the units are what make the reply
+  long. Cascade is the exception: it keeps thinking (it is compressing sixteen
+  summaries, not filling a shape) and pays for it in the same allowance.
+
 - **Cascade** archives sixteen unarchived tier-N summaries into one tier-(N+1)
   entry, using hypatia's own `$not-summaried` (which anti-joins on
   `statement.tail` and orders `created_at ASC`, giving FIFO batching for free).
@@ -211,15 +227,32 @@ agent/session-start ──▶ rules/taboos inject()
   re-log and a re-consolidation, so both passes act only on positive evidence:
   a failed shelf query or an empty session listing changes nothing.
 
-  A third pass consolidates what a restart interrupted. The session-end trigger
-  does not survive one: DSH runs its close path at shutdown (it appends
-  `session/end-seed`), but nothing queued there becomes durable before the
-  process is gone — measured on a live restart, the storage file was not written
-  and the session came back with `lastConsolidatedSeq: 0`. So a row whose logged
-  tail was never consolidated is queued at the next startup, gated by the same
-  `consolidation.minNewTokens` floor and read from the row rather than by
-  loading the session. Without that gate every restart would spend one model
-  call per session carrying any tail at all.
+  A third pass consolidates what a shutdown could only persist, and what a crash
+  or `kill -9` left behind. Nothing a closing session owes survives on its own:
+  `session/disposed` observers are fire-and-forget in DSH, the collect fiber is
+  torn down before the session store releases its sessions, and the queue dies
+  with the fiber — so an `enqueue` there was a silent no-op and a whole run's
+  tails were dropped. Two things fix that. The collect fiber's disposer now
+  **persists** both ranges for every session still open (registering the sweep
+  after the queue's own disposer, because cordis disposes a fiber's effects in
+  reverse order, so it runs while the queue can still write), and this pass
+  finishes the work at the next start. Only the final log write is waited for at
+  shutdown: a hypatia write is milliseconds, while the model call it may trigger
+  is measured in tens of seconds and could never fit inside DSH's 5 s shutdown
+  budget.
+
+  This pass deliberately ignores the `consolidation.minNewTokens` floor that
+  paces the live trigger. The floor is right while a conversation is running —
+  there is always a later turn — but at boot there is no later turn, and a tail
+  skipped here is skipped for good: measured on a live shelf, fifteen sessions
+  carried 1–1950 pending tokens, not one of them was ever consolidated, and
+  eight of nine sessions had messages with `lastConsolidatedSeq: 0`. Cost is
+  bounded by `housekeeping.consolidationBackfillPerScope` instead — at most that
+  many sessions **per project scope** per start, the largest tails first, so a
+  backlog drains over several starts rather than in one unbounded burst of model
+  calls. A range whose consolidate record is `failed` is taken first whatever its
+  size: `resumeKind` never re-schedules a failed row, and re-enqueueing it is the
+  only path back.
 
   Those tasks then read their events from **storage**, not only from the live
   store. `session/created` — the signal that wakes a deferred task — fires only
@@ -368,6 +401,7 @@ hypatia-auto-memory:
     reconcileOnStartup: true     # reset rows whose session has no msg-* left in the shelf
     pruneVanishedSessions: true  # drop rows and tasks of sessions DSH no longer has
     backfillConsolidation: true  # consolidate a logged tail the in-session trigger never reached
+    consolidationBackfillPerScope: 4  # sessions that pass may queue per scope, per start
 ```
 
 The cordis config block on the bundle row only carries skill packaging:

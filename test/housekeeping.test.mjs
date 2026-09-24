@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { backfillConsolidation, normalizeTaskProjects, pruneVanishedSessions, reconcileProgress } from '../src/housekeeping.js'
+import { backfillConsolidation, normalizeTaskProjects, pruneVanishedSessions, reconcileProgress, sessionDirectory } from '../src/housekeeping.js'
 import { EMPTY_PROGRESS } from '../src/progress.js'
 
 function progressTable(seed) {
@@ -112,8 +112,35 @@ function enqueueingQueue() {
   return { specs, enqueue: async (spec) => { specs.push(spec) } }
 }
 
-const CWDS = { live: '/w/proj', gone: undefined }
+const CWDS = {
+  live: '/w/proj',
+  gone: undefined,
+  a1: '/w/proj', a2: '/w/proj', a3: '/w/proj', a4: '/w/proj', a5: '/w/proj',
+  b1: '/w/other',
+}
 const projectForCwd = async (cwd) => cwd.split('/').pop()
+
+test('sessionDirectory reads the header, not the snapshot around it', () => {
+  // `sessionPersistence.list()` yields `{header, revision, …}`. Reading
+  // `id`/`cwd` off the snapshot — the shape this wiring consumed inline once —
+  // produces an EMPTY index, and an empty index makes backfill skip every
+  // session: measured on a live profile, fifteen unconsolidated tails and eight
+  // of nine sessions holding messages with no summary, untouched by a restart.
+  const { cwdById, knownSessionIds } = sessionDirectory([
+    { header: { id: 'a', cwd: '/w/proj' }, revision: 'r1' },
+    { header: { id: 'b' }, revision: 'r2' },
+    { revision: 'r3' },
+  ])
+
+  assert.deepEqual([...knownSessionIds].sort(), ['a', 'b'], 'a header without cwd is still a known session')
+  assert.deepEqual([...cwdById], [['a', '/w/proj']], 'the cwd comes from header.cwd')
+  assert.equal(cwdById.get('b'), undefined)
+})
+
+test('sessionDirectory tolerates a listing call that returns nothing', () => {
+  assert.deepEqual(sessionDirectory(undefined), { cwdById: new Map(), knownSessionIds: new Set() })
+  assert.deepEqual(sessionDirectory([]), { cwdById: new Map(), knownSessionIds: new Set() })
+})
 
 test('backfill consolidates a logged tail the in-session trigger never reached', async () => {
   // A restart takes the session-end trigger with it: measured on a live
@@ -121,7 +148,7 @@ test('backfill consolidates a logged tail the in-session trigger never reached',
   const progress = progressTable({ live: row({ lastLoggedSeq: 900, lastConsolidatedSeq: 400, pendingTokens: 1200 }) })
   const queue = enqueueingQueue()
   const result = await backfillConsolidation({
-    progress, queue, cwdFor: (id) => CWDS[id], projectForCwd, minNewTokens: 800, status: quiet(),
+    progress, queue, cwdFor: (id) => CWDS[id], projectForCwd, status: quiet(),
   })
 
   assert.deepEqual(result.enqueued, ['live'])
@@ -130,17 +157,78 @@ test('backfill consolidates a logged tail the in-session trigger never reached',
   }])
 })
 
-test('backfill respects the same token floor as the live trigger', async () => {
-  // Otherwise every restart spends one model call per session with any tail.
-  const progress = progressTable({ live: row({ lastLoggedSeq: 900, lastConsolidatedSeq: 400, pendingTokens: 799 }) })
+test('backfill drains a tail the live trigger was right to skip', async () => {
+  // The floor paces a live conversation, where a later turn will come. At boot
+  // no later turn is coming, so the same tail would otherwise be skipped for
+  // good — that is the whole bug: measured on a live shelf, fifteen sessions
+  // carried 1–1950 pending tokens and none of them was ever consolidated.
+  const progress = progressTable({ live: row({ lastLoggedSeq: 900, lastConsolidatedSeq: 400, pendingTokens: 12 }) })
   const queue = enqueueingQueue()
   const result = await backfillConsolidation({
-    progress, queue, cwdFor: (id) => CWDS[id], projectForCwd, minNewTokens: 800, status: quiet(),
+    progress, queue, cwdFor: (id) => CWDS[id], projectForCwd, status: quiet(),
   })
 
-  assert.deepEqual(result.enqueued, [])
-  assert.equal(result.skippedBelowFloor, 1)
-  assert.deepEqual(queue.specs, [])
+  assert.deepEqual(result.enqueued, ['live'])
+  assert.equal(result.skipped, 0)
+})
+
+test('backfill recovers a range whose consolidate task is stuck failed', async () => {
+  // Measured: a truncated consolidation used to be classified permanent, and a
+  // failed record is never re-scheduled (`resumeKind` skips it). Re-enqueueing
+  // revives it — `writeTask` replaces a failed row with a fresh `pending` one —
+  // and nothing else does, so this pass is that range's only way back in.
+  const progress = progressTable({ live: row({ lastLoggedSeq: 900, lastConsolidatedSeq: 0, pendingTokens: 10 }) })
+  const queue = {
+    ...enqueueingQueue(),
+    peek: (kind, sessionId) => (kind === 'consolidate' && sessionId === 'live' ? { status: 'failed' } : undefined),
+  }
+  const result = await backfillConsolidation({
+    progress, queue, cwdFor: (id) => CWDS[id], projectForCwd, status: quiet(),
+  })
+
+  assert.deepEqual(result.enqueued, ['live'], 'a lost attempt outranks a cost heuristic')
+  assert.equal(result.skipped, 0)
+  assert.deepEqual(queue.specs, [{
+    kind: 'consolidate', sessionId: 'live', fromSeq: 0, toSeq: 900, project: 'proj', immediate: true,
+  }])
+})
+
+test('backfill spends at most the per-scope cap, biggest tails first', async () => {
+  // The cap is what replaces the floor: a backlog drains over several starts
+  // instead of one unbounded burst of model calls, and the largest unsummarised
+  // spans go first so each call recovers as much as it can.
+  const progress = progressTable({
+    a1: row({ lastLoggedSeq: 100, lastConsolidatedSeq: 0, pendingTokens: 10 }),
+    a2: row({ lastLoggedSeq: 200, lastConsolidatedSeq: 0, pendingTokens: 900 }),
+    a3: row({ lastLoggedSeq: 300, lastConsolidatedSeq: 0, pendingTokens: 500 }),
+    b1: row({ lastLoggedSeq: 400, lastConsolidatedSeq: 0, pendingTokens: 20 }),
+  })
+  const queue = enqueueingQueue()
+  const result = await backfillConsolidation({
+    progress, queue, cwdFor: (id) => CWDS[id], projectForCwd, perScopeLimit: 2, status: quiet(),
+  })
+
+  assert.deepEqual(result.enqueued, ['a2', 'a3', 'b1'], 'two from the first scope, one from the second')
+  assert.equal(result.skipped, 1, 'the smallest tail of the capped scope waits')
+  assert.deepEqual(queue.specs.map((s) => [s.sessionId, s.project]), [
+    ['a2', 'proj'], ['a3', 'proj'], ['b1', 'other'],
+  ])
+})
+
+test('backfill takes a failed range before a larger healthy one', async () => {
+  const progress = progressTable({
+    a1: row({ lastLoggedSeq: 100, lastConsolidatedSeq: 0, pendingTokens: 9000 }),
+    a2: row({ lastLoggedSeq: 200, lastConsolidatedSeq: 0, pendingTokens: 5 }),
+  })
+  const queue = {
+    ...enqueueingQueue(),
+    peek: (kind, sessionId) => (sessionId === 'a2' ? { status: 'failed' } : undefined),
+  }
+  const result = await backfillConsolidation({
+    progress, queue, cwdFor: (id) => CWDS[id], projectForCwd, perScopeLimit: 1, status: quiet(),
+  })
+
+  assert.deepEqual(result.enqueued, ['a2'])
 })
 
 test('backfill ignores a fully consolidated session and one DSH no longer lists', async () => {
@@ -150,7 +238,7 @@ test('backfill ignores a fully consolidated session and one DSH no longer lists'
   })
   const queue = enqueueingQueue()
   const result = await backfillConsolidation({
-    progress, queue, cwdFor: (id) => CWDS[id], projectForCwd, minNewTokens: 800, status: quiet(),
+    progress, queue, cwdFor: (id) => CWDS[id], projectForCwd, status: quiet(),
   })
 
   assert.deepEqual(result.enqueued, [], 'no tail, and no session to resolve a scope from')
