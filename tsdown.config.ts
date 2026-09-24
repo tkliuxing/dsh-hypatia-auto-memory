@@ -85,8 +85,16 @@ export default {
         cssModules: { pattern: '[hash]_[local]' },
         minify: true,
       })
+      // Sort before building the map: lightningcss hands `exports` back in an
+      // order that varies between runs, and `JSON.stringify` preserves insertion
+      // order, so an unsorted map made every build emit a differently ordered
+      // bundle — identical in meaning, different in bytes. That is churn in
+      // `lib/client.js` on every `npm run build`, and `prepublishOnly` runs one,
+      // so every release carried a spurious diff. Sorting the locals is enough:
+      // nothing reads this object by position.
       const classMap: Record<string, string> = {}
-      for (const [local, exported] of Object.entries(cssExports ?? {})) classMap[local] = exported.name
+      const locals = Object.entries(cssExports ?? {}).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+      for (const [local, exported] of locals) classMap[local] = exported.name
       return styleInjectionModule(fileId, code.toString(), classMap)
     },
   }],
