@@ -316,7 +316,7 @@ rules/taboos 预载、启动清理。设置卡片把它做成 `hypatia list` 所
 | 条目只在 turn 结束后才出现 | 设计如此：span 在 `turn/end` 切分，或当 turn 跑得比 `flushWindowMs` 久时在第一个 `step/end` 切分，所以条目不会缺它自己的工具结果 |
 | 有记录，没摘要 | `consolidation.models` 为空或无效——首次触发时告警一次 |
 | 有摘要但没有 `sum2-*` | 该项目里未归档的 tier-1 摘要还不足 `cascade.batchSize` 条 |
-| 工作单元没有关系 | shelf 没有嵌入模型（`similar` 失败），或所有候选都超过了 `dedupMaxDistance`。自 hypatia #19 起，本地模型在 `~/.hypatia/models/<org>/<name>`（或 Hugging Face 缓存）里找，不再挨着 shelf：一个以前能回答 `similar`、现在说 `is not installed` 的 shelf，需要 `hypatia model install <model>`，或 `hypatia model register <model> <dir>` 指向它已有的文件 |
+| 工作单元没有关系 | shelf 没有嵌入模型（`similar` 失败），所有候选都超过了 `dedupMaxDistance`，或裁决调用本身没有产出裁决——`model_calls` 里表现为 `incomplete` / `max-tokens`，也就是开启了思考的路由把整个输出预算花在推理上、还没开始作答就撞了上限。现在裁决会先确认适配器声明了 `off`，再对该路由请求 `reasoningEffort: 'off'`；对无法接受它的路由则把上限提到 1024。自 hypatia #19 起，本地模型在 `~/.hypatia/models/<org>/<name>`（或 Hugging Face 缓存）里找，不再挨着 shelf：一个以前能回答 `similar`、现在说 `is not installed` 的 shelf，需要 `hypatia model install <model>`，或 `hypatia model register <model> <dir>` 指向它已有的文件 |
 | `similar` 仍返回 `msg-*` 行 | 它们是在本插件让日志层退出嵌入之前写的，或由一个没有 `--no-embed` 的 hypatia 写的。在 shelf 的 `shelf.toml` 里用 `embedding.skip_tags = ["message"]` 加一次 `hypatia backfill` 一次性收回知识向量（比该 key 旧的二进制会拒绝打开 shelf，所以先升级所有共享它的二进制）。不要把 `session` 加进那个列表：`skip_tags` 匹配任何带该 tag 的条目，而人们写的关于会话的知识也带它——在试过的 shelf 上就有一条这样的条目丢了向量。插件自己的 `session-*` 节点很少，现在已逐次写入退出。三元组没有 tags 也没有 update 命令，所以之前写的 `belongTo` / `summary` 边保留向量 |
 | 任务处于 `deferred` 状态 | live store 和 persistence 都没能提供它的会话。不是错误：它不消耗尝试次数，一旦二者之一能提供就运行。通常 storage 立即回答——只有组合里没有 `sessionPersistence`，或它的读取失败（日志里找 `could not be read`）时才会持久化这个状态 |
 | 任务处于 `failed` 状态 | 一次 hypatia 或模型错误在 `maxAttempts` 之后持久化了。失败的 `log-message` 记录在下次启动时被修剪，因为水位会重新推导它们的范围；其它类型保留供检查——删掉一条好让下一个触发器重新创建它 |

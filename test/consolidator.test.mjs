@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  ADJUDICATION_MAX_TOKENS,
+  ADJUDICATION_REASONING_EFFORT,
   buildTranscript,
   consolidationStart,
   createConsolidator,
@@ -11,6 +13,8 @@ import {
 import { createWriter } from '../src/writer.js'
 import { TaskDeferredError } from '../src/queue.js'
 import { makeModelLogDouble } from './model-log-double.mjs'
+
+const silentStatus = { warn: () => {}, info: () => {}, count: () => {}, error: () => {}, markConsolidated: () => {} }
 
 function ev(type, seq, data = {}, time = 1725800000000) {
   return { type, seq, time, data }
@@ -417,15 +421,26 @@ test('a stop that parses into nothing is incomplete, and never quotes the reply'
 })
 
 /** Minimal doubles for `adjudicate`, which needs only a route, a config and a stream. */
-function makeAdjudicateHarness({ replyText, finishKind = 'stop', throwError, modelLog }) {
+function makeAdjudicateHarness({
+  replyText, finishKind = 'stop', throwError, modelLog,
+  reasoningEfforts, resolveError, streams, resolveCalls, status = silentStatus,
+}) {
   const llm = {
-    async *stream() {
+    async *stream(request) {
+      streams?.push(request)
       if (throwError !== undefined) throw throwError
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: replyText }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: replyText } }
       yield { type: 'finish', reason: { kind: finishKind } }
     },
+  }
+  if (reasoningEfforts !== undefined || resolveError !== undefined) {
+    llm.resolveModelInfo = async () => {
+      if (resolveCalls !== undefined) resolveCalls.n += 1
+      if (resolveError !== undefined) throw resolveError
+      return { reasoning: { efforts: reasoningEfforts.map((id) => ({ id, name: id })) } }
+    }
   }
   return createConsolidator({
     queue: {}, progress: {}, sessions: {}, llm, cli: {}, writer: {},
@@ -437,7 +452,7 @@ function makeAdjudicateHarness({ replyText, finishKind = 'stop', throwError, mod
         checkEveryTurns: 5, minNewTokens: 100, maxWorkUnitsPerRun: 2,
       },
     }),
-    status: { warn: () => {}, info: () => {}, count: () => {}, error: () => {}, markConsolidated: () => {} },
+    status,
     modelLog,
     projectFor: async () => 'demo',
   })
@@ -477,6 +492,73 @@ test('an adjudication call that throws is recorded as error', async () => {
   assert.deepEqual(modelLog.attempts.map((a) => [a.purpose, ...a.done]), [
     ['memory-adjudication', 'error', 'socket hang up'],
   ])
+})
+
+test('adjudication asks the route to skip thinking when it advertises `off`', async () => {
+  // A thinking-enabled route shares ONE output budget between its reasoning and
+  // its answer. `deepseek-*` resolves an omitted effort to `high` and spends
+  // about half its output on reasoning, which is how a 200-token adjudication
+  // ended with `max-tokens` and stored every work unit with no relationship.
+  const streams = []
+  const modelLog = makeModelLogDouble()
+  const c = makeAdjudicateHarness({
+    replyText: '{"verdict":"refines","target":"wu-old"}', modelLog, streams,
+    reasoningEfforts: ['off', 'low', 'high', 'max'],
+  })
+
+  const decision = await c.adjudicate(ADJUDICATE_UNIT, ADJUDICATE_CANDIDATES)
+
+  assert.deepEqual(decision, { verdict: 'refines', target: 'wu-old' })
+  assert.equal(streams[0].reasoningEffort, ADJUDICATION_REASONING_EFFORT)
+  assert.equal(streams[0].maxTokens, ADJUDICATION_MAX_TOKENS)
+  assert.ok(ADJUDICATION_MAX_TOKENS > 200, 'a route that cannot honour `off` still has to fit thinking')
+  assert.deepEqual(modelLog.attempts.map((a) => [a.purpose, ...a.done]), [['memory-adjudication', 'ok', '']])
+})
+
+test('adjudication does not ask for an effort the route does not advertise', async () => {
+  // The core rejects that outright (`UNSUPPORTED_REASONING_EFFORT`), so the
+  // control must only ever follow a positive capability answer.
+  const noOff = []
+  await makeAdjudicateHarness({
+    replyText: '{"verdict":"unrelated","target":""}', streams: noOff,
+    reasoningEfforts: ['low', 'high'],
+  }).adjudicate(ADJUDICATE_UNIT, ADJUDICATE_CANDIDATES)
+  assert.equal('reasoningEffort' in noOff[0], false, 'a route without `off` keeps the provider default')
+
+  // A model that declares no reasoning at all, and an `llm` that cannot answer.
+  const noReasoning = []
+  await makeAdjudicateHarness({ replyText: '{"verdict":"unrelated","target":""}', streams: noReasoning })
+    .adjudicate(ADJUDICATE_UNIT, ADJUDICATE_CANDIDATES)
+  assert.equal('reasoningEffort' in noReasoning[0], false)
+})
+
+test('the reasoning capability is looked up once per route', async () => {
+  const resolveCalls = { n: 0 }
+  const c = makeAdjudicateHarness({
+    replyText: '{"verdict":"unrelated","target":""}', streams: [],
+    reasoningEfforts: ['off'], resolveCalls,
+  })
+
+  await c.adjudicate(ADJUDICATE_UNIT, ADJUDICATE_CANDIDATES)
+  await c.adjudicate(ADJUDICATE_UNIT, ADJUDICATE_CANDIDATES)
+
+  assert.equal(resolveCalls.n, 1, 'capability does not change while the instance lives')
+})
+
+test('a capability lookup that fails still adjudicates, without the control', async () => {
+  const warnings = []
+  const streams = []
+  const c = makeAdjudicateHarness({
+    replyText: '{"verdict":"extends","target":"wu-old"}', streams,
+    resolveError: new Error('provider is not registered'),
+    status: { ...silentStatus, warn: (m) => warnings.push(m) },
+  })
+
+  const decision = await c.adjudicate(ADJUDICATE_UNIT, ADJUDICATE_CANDIDATES)
+
+  assert.deepEqual(decision, { verdict: 'extends', target: 'wu-old' })
+  assert.equal('reasoningEffort' in streams[0], false)
+  assert.match(warnings[0], /reasoning capability lookup failed/)
 })
 
 test('consolidationStart never begins inside a fork\'s inherited prefix', () => {

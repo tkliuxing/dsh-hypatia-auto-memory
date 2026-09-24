@@ -23,6 +23,28 @@ import { NULL_MODEL_LOG } from './model-log.js'
 
 export const PLUGIN_NAME = 'dsh-hypatia-auto-memory'
 
+/**
+ * Output budget for one adjudication.
+ *
+ * It is not 200 — the value it carried for as long as the call existed — because
+ * a thinking-enabled route spends the SAME cap on its reasoning and its answer.
+ * `deepseek-*` resolves an omitted `reasoningEffort` to `high` (the
+ * `llm-deepseek` profile default) and puts roughly half its output tokens into
+ * reasoning, so a 200-token adjudication ended with `max-tokens` before the
+ * verdict was ever emitted: every other work unit was silently stored with no
+ * relationship at all. `ADJUDICATION_REASONING_EFFORT` below usually removes
+ * the need for the headroom, but a route that cannot honour `off` — or a
+ * provider that ignores the control — still has to fit thinking plus a verdict.
+ */
+export const ADJUDICATION_MAX_TOKENS = 1024
+
+/**
+ * What the adjudication call asks for on a route that advertises it. A verdict
+ * is a six-way classification of two short texts: thinking there spends the
+ * output budget and the latency for nothing.
+ */
+export const ADJUDICATION_REASONING_EFFORT = 'off'
+
 /** Distinguishes permanent failures (no retry value) from transient ones. */
 export class PermanentConsolidationError extends Error {
   constructor(message) {
@@ -273,6 +295,38 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
   const selectRoute = createConsolidationRouteSelector()
 
   /**
+   * Whether a route may be asked for {@link ADJUDICATION_REASONING_EFFORT},
+   * memoized per route for this instance.
+   *
+   * The core rejects a request whose effort the model does not advertise
+   * (`UNSUPPORTED_REASONING_EFFORT`, `llm`'s `resolveCallWithInfo`), so the
+   * control only follows a positive capability answer. A route that cannot be
+   * inspected — an adapter that throws, or the `llm` double a unit test hands
+   * in — simply gets no effort, which is what every call did before this.
+   * Capability does not change while an instance lives; a profile reload
+   * rebuilds the instance and the cache with it.
+   *
+   * @param {{provider: string, model: string}} route
+   * @param {AbortSignal} signal - the same signal the call carries, so a
+   * lookup cannot outlive the timeout it is part of.
+   */
+  const thinkingOff = new Map()
+  async function canDisableThinking(route, signal) {
+    const key = `${route.provider}\0${route.model}`
+    if (thinkingOff.has(key)) return thinkingOff.get(key)
+    let supported = false
+    try {
+      const info = await llm.resolveModelInfo?.(route.provider, route.model, signal)
+      supported = Array.isArray(info?.reasoning?.efforts)
+        && info.reasoning.efforts.some((effort) => effort?.id === ADJUDICATION_REASONING_EFFORT)
+    } catch (error) {
+      status.warn(`reasoning capability lookup failed for ${key.replace('\0', '/')}: ${String(error)}`)
+    }
+    thinkingOff.set(key, supported)
+    return supported
+  }
+
+  /**
    * Turn-end trigger check. The turn threshold is a minimum interval between
    * accepted consolidation tasks, not a polling cadence: once the interval
    * has elapsed, every later turn re-evaluates the token/log gates until work
@@ -396,6 +450,8 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
     let outcome = 'incomplete'
     let detail = ''
     try {
+      // Asked for only when the route advertises it; see `canDisableThinking`.
+      const skipThinking = await canDisableThinking(route, controller.signal)
       const { createUserMessage, BlockAssembler } = await import('@deepseek-ai/dsh-llm')
       const assembler = new BlockAssembler()
       for await (const chunk of llm.stream({
@@ -406,7 +462,8 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
           content: [{ type: 'text', text: instruction }],
           source: { kind: 'plugin', plugin: PLUGIN_NAME },
         })],
-        maxTokens: 200,
+        maxTokens: ADJUDICATION_MAX_TOKENS,
+        ...skipThinking ? { reasoningEffort: ADJUDICATION_REASONING_EFFORT } : {},
         purpose: 'memory-adjudication',
         signal: controller.signal,
       })) {
