@@ -357,12 +357,23 @@ changes. No card claims it, so it renders nowhere; nothing ever writes to it.
    (get-before-create); uncovered ranges are re-enqueued from watermarks.
 4. To check the route warning: consolidation with no selected `models`
    logs a one-time warning and otherwise stays silent.
-5. `hypatia backfill --status` reports the shelf's embedding debt. With a
+5. Which model a background call actually ran on is recorded per attempt in
+   `~/.dsh/storages/hypatia_auto_memory_diag.json` (`tables.model_calls`,
+   newest first by `seq`, bounded to 100). The settings list is not the answer:
+   one process-local cursor rotates through `consolidation.models` across every
+   span summary, adjudication and cascade call, so consecutive attempts
+   alternate. `outcome` is `pending` (in flight, or the process died mid-call),
+   `ok` (a usable result was produced), `incomplete` (the call settled without
+   one — output cap, abort, unparseable reply) or `error` (the call threw); in
+   the last two the cursor was consumed and nothing was stored. `detail` is a
+   finish kind, a fixed label, or the provider's message, capped at 200
+   characters — never message content and never model output.
+6. `hypatia backfill --status` reports the shelf's embedding debt. With a
    current hypatia, logging a turn adds nothing to it; only summaries and work
    units are pending until the next flush. `hypatia scope list --count` shows
    the scopes in use — the one this project's `msg-*` entries carry is the one
    the session seed reads.
-6. Uninstall: `dsh plugin --profile web remove dsh-hypatia-auto-memory` —
+7. Uninstall: `dsh plugin --profile web remove dsh-hypatia-auto-memory` —
    hypatia entries themselves are left in `~/.hypatia/`.
 
 ## Failure modes
@@ -386,6 +397,7 @@ changes. No card claims it, so it renders nowhere; nothing ever writes to it.
 | Duplicate `msg-*` after weird manual edits | Delete the entry in hypatia and lower `lastLoggedSeq` for that session in the state domain — backfill recreates it once |
 | The agent's own `hypatia` write still asks for approval | `autoApprove: false` (needs a profile reload to change), the command pipes/redirects/chains outside quotes, or its first word is not one of `binaries` — only plain calls are answered, by design. Reads never reach approval at all, so nothing to fix there |
 | The agent got a memory protocol that tells it to log messages by hand | Another plugin registered `hypatia-memory` first (`dsh-hypatia` still in the profile), or a `hypatia-memory` exists on disk — typically `~/.agents/skills/hypatia-memory`, written by `hypatia skill install --agent codex`. Agent presets load disk skills in a layer nearer than plugins, so it wins in sessions even though the skill center may list this plugin. Remove the copy the startup warning names |
+| Can't tell which model actually ran | By design the choice rotates: one process-local cursor is shared by span summaries, adjudication and cascade, so consecutive calls alternate through `consolidation.models`. Each attempt lands in `~/.dsh/storages/hypatia_auto_memory_diag.json` (`model_calls`) with purpose, provider/model, outcome and duration. The usage ledger cannot answer this — it folds agent turns (`assistant/message`) and never sees a plugin's direct `llm.stream`. A `pending` row means the call is still in flight, or the process died mid-call: the row is written before the call and settled after it |
 | Startup warnings never appear in the terminal | `dsh web` mounts no log exporter, so plugin log lines of any level go nowhere; the console exporter's default threshold would also drop warnings (warn is level 2, above info's 1). Mount a logger such as `dsh-logbook` or `dsh-boot-doctor` temporarily to read them |
 | Project scope looks wrong | Scope = basename of the session cwd's git top level (`git rev-parse --show-toplevel`), or of the cwd itself when git finds no work tree or cannot answer (not installed, a repo it refuses as unsafe). A `rev-parse` slower than 3 s leaves that one session on the cwd's own name. Two same-named checkouts share a scope by design; a linked worktree is scoped by its own directory, not the main checkout's; git resolves symlinks, so a checkout opened through a link named differently from its target gets the target's name. A name hypatia would rewrite is normalized first: a session at `/` is scoped `/`, commas become `_`, surrounding whitespace goes. Entries written before these fixes stay where they were stored: a subdirectory session's under that directory's name (`repo/src` wrote under `src` — the git root was never read), a session at `/` with no scope, `a,b` under both `a` and `b`, `foo,` under `foo` and global. Padded names were stored trimmed, which is what the query now asks for. Nothing migrates them; `knowledge-update --scopes` moves one entry and keeps its `created_at`. `hypatia scope list --count` (hypatia #30) shows every spelling in use and how many entries each holds |
 
@@ -482,6 +494,7 @@ dsh-hypatia-auto-memory/
 │   ├── writer.js         # idempotent get-before-create writes
 │   ├── consolidator.js   # thresholds, prompt, llm.stream, validation
 │   ├── cascade.js        # log₁₆(n) hierarchical summary archive
+│   ├── model-log.js      # bounded record of which model each attempt ran on
 │   ├── recall.js         # rules/taboos preload at session start
 │   ├── auto-approve.js   # approves the agent's own plain bash hypatia calls
 │   ├── skills.js         # bundled skill registration (never shadows another provider)

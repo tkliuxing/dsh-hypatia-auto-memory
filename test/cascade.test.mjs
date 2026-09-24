@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { archiveName, createCascade, levelTag, notSummarisedQuery } from '../src/cascade.js'
+import { makeModelLogDouble } from './model-log-double.mjs'
 
 const ROUTE = { provider: 'p', model: 'm' }
 
@@ -67,6 +68,22 @@ function makeLlm(titles = []) {
 }
 
 const silentStatus = { info: () => {}, warn: () => {}, error: () => {}, count: () => {} }
+
+/**
+ * An llm double that hands back exactly the text (or failure) a test wants, so
+ * the unusable-reply paths can be driven without inventing a provider.
+ */
+function makeRawLlm({ text = '', finishKind = 'stop', throwError } = {}) {
+  return {
+    async *stream() {
+      if (throwError !== undefined) throw throwError
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      yield { type: 'finish', reason: { kind: finishKind } }
+    },
+  }
+}
 
 function tierEntries(tag, count, prefix) {
   return Array.from({ length: count }, (_, i) => ({
@@ -206,4 +223,75 @@ test('a failing tier query stops the climb without throwing', async () => {
   await cascade.execute({ project: 'demo' })
   assert.equal(cli.created.length, 0)
   assert.match(warnings[0], /cascade query failed/)
+})
+
+test('the archive call records which route actually ran it', async () => {
+  // The route comes from a process-local cursor, so without this record "which
+  // model archived that tier" is unanswerable from outside the process.
+  const cli = makeCli({ [levelTag(1)]: tierEntries(levelTag(1), 3, 'sum-s1') })
+  const modelLog = makeModelLogDouble()
+  const cascade = createCascade({
+    cli, llm: makeLlm(['Storage rewrite']), selectRoute: () => ROUTE,
+    getConfig: makeConfig({ batchSize: 3 }), status: silentStatus, modelLog,
+  })
+
+  await cascade.execute({ project: 'demo' })
+
+  assert.deepEqual(modelLog.attempts.map((a) => [a.purpose, a.route, ...a.done]), [
+    ['memory-cascade', ROUTE, 'ok', ''],
+  ])
+})
+
+test('an archive call that ends on the output cap is incomplete, not ok', async () => {
+  const cli = makeCli({ [levelTag(1)]: tierEntries(levelTag(1), 3, 'sum-s1') })
+  const modelLog = makeModelLogDouble()
+  const warnings = []
+  const cascade = createCascade({
+    cli, llm: makeRawLlm({ text: '{"title":"x","summary":"- y"', finishKind: 'max-tokens' }),
+    selectRoute: () => ROUTE,
+    getConfig: makeConfig({ batchSize: 3 }),
+    status: { ...silentStatus, warn: (m) => warnings.push(m) },
+    modelLog,
+  })
+
+  await cascade.execute({ project: 'demo' })
+
+  assert.deepEqual(modelLog.attempts.map((a) => [a.purpose, ...a.done]), [
+    ['memory-cascade', 'incomplete', 'max-tokens'],
+  ])
+  assert.deepEqual(cli.created, [])
+  assert.match(warnings[0], /produced nothing usable/)
+})
+
+test('an unparseable reply is incomplete and never quotes the reply', async () => {
+  // Node's JSON.parse error carries the offending input, so recording the
+  // thrown message would put model output in the diagnostics table and the log.
+  const cli = makeCli({ [levelTag(1)]: tierEntries(levelTag(1), 3, 'sum-s1') })
+  const modelLog = makeModelLogDouble()
+  const cascade = createCascade({
+    cli, llm: makeRawLlm({ text: 'Here is the archive you asked for' }), selectRoute: () => ROUTE,
+    getConfig: makeConfig({ batchSize: 3 }), status: silentStatus, modelLog,
+  })
+
+  await cascade.execute({ project: 'demo' })
+
+  assert.deepEqual(modelLog.attempts.map((a) => [a.purpose, ...a.done]), [
+    ['memory-cascade', 'incomplete', 'unparseable reply'],
+  ])
+  assert.ok(!JSON.stringify(modelLog.attempts).includes('Here is the archive'), 'model output reached diagnostics')
+})
+
+test('an archive call that throws is recorded as error with its message', async () => {
+  const cli = makeCli({ [levelTag(1)]: tierEntries(levelTag(1), 3, 'sum-s1') })
+  const modelLog = makeModelLogDouble()
+  const cascade = createCascade({
+    cli, llm: makeRawLlm({ throwError: new Error('socket hang up') }), selectRoute: () => ROUTE,
+    getConfig: makeConfig({ batchSize: 3 }), status: silentStatus, modelLog,
+  })
+
+  await assert.rejects(cascade.execute({ project: 'demo' }), /socket hang up/)
+  assert.deepEqual(modelLog.attempts.map((a) => [a.purpose, ...a.done]), [
+    ['memory-cascade', 'error', 'socket hang up'],
+  ])
+  assert.deepEqual(cli.created, [])
 })

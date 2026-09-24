@@ -22,6 +22,7 @@
 import { createHash } from 'node:crypto'
 
 import { PLUGIN_NAME } from './consolidator.js'
+import { NULL_MODEL_LOG } from './model-log.js'
 
 /** Tag marking the tier an entry belongs to. */
 export function levelTag(level) {
@@ -80,9 +81,10 @@ function archiveInstruction(level, count) {
  *   selectRoute: (routes: any) => any,
  *   getConfig: () => any,
  *   status: import('./status.js').StatusLog,
+ *   modelLog?: ReturnType<import('./model-log.js').createModelLog>,
  * }} deps
  */
-export function createCascade({ cli, llm, selectRoute, getConfig, status }) {
+export function createCascade({ cli, llm, selectRoute, getConfig, status, modelLog = NULL_MODEL_LOG }) {
   /**
    * Ask the model to archive one batch.
    * @returns {Promise<{title: string, summary: string} | undefined>}
@@ -93,8 +95,11 @@ export function createCascade({ cli, llm, selectRoute, getConfig, status }) {
       return `### ${i + 1}. ${row.name}\n${data}`
     }).join('\n\n')
 
+    const attempt = modelLog.begin('memory-cascade', route)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
+    let outcome = 'incomplete'
+    let detail = ''
     try {
       const { createUserMessage, BlockAssembler } = await import('@deepseek-ai/dsh-llm')
       const assembler = new BlockAssembler()
@@ -112,18 +117,38 @@ export function createCascade({ cli, llm, selectRoute, getConfig, status }) {
       })) {
         assembler.push(chunk)
       }
-      if (assembler.finish.kind !== 'stop') return undefined
+      if (assembler.finish.kind !== 'stop') {
+        detail = String(assembler.finish.kind)
+        return undefined
+      }
       const text = assembler.blocks().filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim()
       const fence = /^```(?:json)?\s*([\s\S]*?)```\s*$/.exec(text)
-      const parsed = JSON.parse(fence ? fence[1].trim() : text)
+      // Its own catch: a parse failure is an unusable reply, not a failed call,
+      // and Node's parse error quotes the reply's opening characters.
+      let parsed
+      try {
+        parsed = JSON.parse(fence ? fence[1].trim() : text)
+      } catch {
+        detail = 'unparseable reply'
+        return undefined
+      }
       const summary = typeof parsed?.summary === 'string' ? parsed.summary.trim() : ''
-      if (summary === '') return undefined
+      if (summary === '') {
+        detail = 'no summary'
+        return undefined
+      }
       const title = typeof parsed?.title === 'string' && parsed.title.trim() !== ''
         ? parsed.title.trim()
         : `Archive tier ${level}`
+      outcome = 'ok'
       return { title, summary }
+    } catch (error) {
+      outcome = 'error'
+      detail = error instanceof Error ? error.message : String(error)
+      throw error
     } finally {
       clearTimeout(timer)
+      void attempt.finish(outcome, detail)
     }
   }
 

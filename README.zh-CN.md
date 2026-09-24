@@ -292,11 +292,19 @@ rules/taboos 预载、启动清理。设置卡片把它做成 `hypatia list` 所
 3. 写入中途重启是安全的：已存储的消息被跳过（get-before-create）；未覆盖的范围从
    水位重新排队。
 4. 检查路由告警：没选 `models` 的巩固只记录一次告警，其余时间静默。
-5. `hypatia backfill --status` 报告 shelf 的嵌入债务。用当前的 hypatia，记录一个
+5. 后台调用实际用了哪个模型，逐次记在
+   `~/.dsh/storages/hypatia_auto_memory_diag.json`（`tables.model_calls`，按 `seq`
+   倒序，上限 100 条）。设置卡片里的列表不是答案：一个进程内游标被 span 摘要、
+   裁决和 cascade 三者共用，所以相邻几次调用是轮流换模型的。`outcome` 为
+   `pending`（在飞行中，或进程中途死了）、`ok`（产出了可用结果）、`incomplete`
+   （调用结束了但没产出——撞输出上限、被中止、回复解析不出来）或 `error`（调用本身
+   抛错）；后两种都消耗了游标且没有写入任何条目。`detail` 是 finish kind、固定标签
+   或 provider 的错误消息，截断到 200 字符——绝不放消息正文，也绝不放模型输出。
+6. `hypatia backfill --status` 报告 shelf 的嵌入债务。用当前的 hypatia，记录一个
    turn 不会增加债务；只有摘要和工作单元在下一次 flush 前处于待处理。`hypatia scope
    list --count` 显示在用的 scope——本项目 `msg-*` 条目所带的那个，就是会话种子读取
    的那个。
-6. 卸载：`dsh plugin --profile web remove dsh-hypatia-auto-memory`——hypatia 条目
+7. 卸载：`dsh plugin --profile web remove dsh-hypatia-auto-memory`——hypatia 条目
    本身留在 `~/.hypatia/`。
 
 ## 故障模式
@@ -320,6 +328,7 @@ rules/taboos 预载、启动清理。设置卡片把它做成 `hypatia list` 所
 | 手动乱改后出现重复 `msg-*` | 在 hypatia 里删掉该条目，并在 state domain 里把该会话的 `lastLoggedSeq` 调低——回填会重新创建它一次 |
 | Agent 自己的 `hypatia` 写入仍要审批 | `autoApprove: false`（改动需重载 profile）、命令在引号外有管道/重定向/串联、或首词不是 `binaries` 之一——按设计只回答纯调用。读取根本不会走到审批，所以那里没有要修的 |
 | Agent 拿到了一份教它手动记录消息的记忆协议 | 另一个插件先注册了 `hypatia-memory`（profile 里还有 `dsh-hypatia`），或磁盘上有 `hypatia-memory`——通常是 `hypatia skill install --agent codex` 写的 `~/.agents/skills/hypatia-memory`。Agent 预设会在比插件更近的一层加载磁盘技能，所以它在会话里胜出，尽管技能中心可能列出本插件。删掉启动告警指出的那份拷贝 |
+| 不知道实际用了哪个模型 | 设计上就是轮流的：span 摘要、裁决、cascade 共用一个进程内游标，所以相邻调用在 `consolidation.models` 里交替。每次尝试都落在 `~/.dsh/storages/hypatia_auto_memory_diag.json`（`model_calls`），带 purpose、provider/model、outcome 和耗时。usage ledger 答不了这个问题——它只折算 Agent 的 turn（`assistant/message`），看不见插件直连的 `llm.stream`。`pending` 行表示调用仍在进行中，或进程在调用中途死了：记录在调用前先落盘、调用结束后回填 |
 | 启动告警从不出现在终端 | `dsh web` 不挂日志导出器，所以插件任何级别的日志行都没地方去；控制台导出器的默认阈值也会丢掉警告（warn 是 2 级，高于 info 的 1 级）。临时挂一个 logger，如 `dsh-logbook` 或 `dsh-boot-doctor` 来读它们 |
 | 项目 scope 看起来不对 | Scope = 会话 cwd 的 git 顶层目录的 basename（`git rev-parse --show-toplevel`）；git 找不到工作树或答不上（未安装、或某 repo 被判定不安全）时，则是 cwd 本身的 basename。一次慢于 3 秒的 `rev-parse` 会让那个会话留在 cwd 自己的名字上。两个同名 checkout 按设计共享 scope；linked worktree 按它自己的目录而非主 checkout 的目录定 scope；git 会解析符号链接，所以通过一个与目标不同名的链接打开的 checkout 会得到目标的名字。一个会被 hypatia 改写的名字会先归一化：位于 `/` 的会话定 scope 为 `/`，逗号变 `_`，去掉首尾空白。这些修复之前写的条目留在原处：子目录会话写在那个目录名下（`repo/src` 写在 `src` 下——git 根从未被读取）、位于 `/` 的会话无 scope、`a,b` 同时写在 `a` 和 `b` 下、`foo,` 写在 `foo` 和全局下。带空白的名字被去空白存储，这也正是查询现在所请求的。没有任何东西迁移它们；`knowledge-update --scopes` 可移动单条并保留其 `created_at`。`hypatia scope list --count`（hypatia #30）显示每种在用的拼写及其条目数 |
 
@@ -394,6 +403,7 @@ dsh-hypatia-auto-memory/
 │   ├── writer.js         # 幂等 get-before-create 写入
 │   ├── consolidator.js   # 阈值、prompt、llm.stream、校验
 │   ├── cascade.js        # log₁₆(n) 分层摘要归档
+│   ├── model-log.js      # 每次尝试实际用了哪个模型的有界记录
 │   ├── recall.js         # 会话启动时的 rules/taboos 预载
 │   ├── auto-approve.js   # 批准 Agent 自己的纯 bash hypatia 调用
 │   ├── skills.js         # 随包技能注册（从不遮蔽其它提供者）

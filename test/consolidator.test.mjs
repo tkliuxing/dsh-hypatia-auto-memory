@@ -10,6 +10,7 @@ import {
 } from '../src/consolidator.js'
 import { createWriter } from '../src/writer.js'
 import { TaskDeferredError } from '../src/queue.js'
+import { makeModelLogDouble } from './model-log-double.mjs'
 
 function ev(type, seq, data = {}, time = 1725800000000) {
   return { type, seq, time, data }
@@ -225,7 +226,7 @@ test('onTurnEnd retains the checkpoint while consolidation is disabled', async (
 })
 
 /** Minimal doubles for a full `execute` run. */
-function makeExecuteHarness({ events, maxInputTokens, inherited = 0 }) {
+function makeExecuteHarness({ events, maxInputTokens, inherited = 0, modelLog, finishKind = 'stop', finishFailure, replyText }) {
   const progressMap = new Map()
   const progress = {
     get: (k) => progressMap.get(k),
@@ -246,11 +247,16 @@ function makeExecuteHarness({ events, maxInputTokens, inherited = 0 }) {
   const llm = {
     async *stream(request) {
       prompts.push(request.messages[0].content[0].text)
-      const payload = JSON.stringify({ summary: '- did things', workUnits: [] })
+      const payload = replyText ?? JSON.stringify({ summary: '- did things', workUnits: [] })
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: payload }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: payload } }
-      yield { type: 'finish', reason: { kind: 'stop' } }
+      yield {
+        type: 'finish',
+        reason: finishFailure === undefined
+          ? { kind: finishKind }
+          : { kind: finishKind, failure: { message: finishFailure } },
+      }
     },
   }
   const enqueued = []
@@ -281,6 +287,7 @@ function makeExecuteHarness({ events, maxInputTokens, inherited = 0 }) {
       },
     }),
     status,
+    modelLog,
     projectFor: async () => 'demo',
   })
   return { consolidator, progressMap, written, prompts, enqueued }
@@ -325,6 +332,151 @@ test('execute covers the whole span when it fits, and never ships raw secrets', 
   assert.equal(h.prompts.length, 1)
   assert.ok(!h.prompts[0].includes('sk-abcdef1234567890XYZ'), 'secret reached the model')
   assert.ok(h.prompts[0].includes('[REDACTED:secret:key]'))
+})
+
+test('execute records the model attempt that produced the summary', async () => {
+  // Without this row, "which model summarised that span" is unanswerable: the
+  // cursor that picked it lives only in this process.
+  const events = [
+    ev('user/message', 0, { source: { kind: 'user' }, content: [{ type: 'text', text: 'do the thing' }] }),
+    ev('assistant/message', 1, { turn: 1, message: { content: [{ type: 'text', text: 'done' }] } }),
+  ]
+  const modelLog = makeModelLogDouble()
+  const h = makeExecuteHarness({ events, maxInputTokens: 10_000, modelLog })
+  await h.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 2, project: 'demo' })
+
+  assert.deepEqual(modelLog.attempts.map((a) => [a.purpose, a.route, ...a.done]), [
+    ['memory-consolidation', { provider: 'p', model: 'm' }, 'ok', ''],
+  ])
+})
+
+test('a model call that ends without usable output is recorded as incomplete', async () => {
+  // The output cap consumes the round-robin cursor and produces no summary, so
+  // without this row a truncated attempt would look from outside exactly like
+  // an attempt that never happened.
+  const events = [
+    ev('user/message', 0, { source: { kind: 'user' }, content: [{ type: 'text', text: 'do the thing' }] }),
+    ev('assistant/message', 1, { turn: 1, message: { content: [{ type: 'text', text: 'done' }] } }),
+  ]
+  const modelLog = makeModelLogDouble()
+  const h = makeExecuteHarness({ events, maxInputTokens: 10_000, modelLog, finishKind: 'max-tokens' })
+
+  await assert.rejects(
+    h.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 2, project: 'demo' }),
+    PermanentConsolidationError,
+  )
+  assert.deepEqual(modelLog.attempts.map((a) => [a.purpose, ...a.done]), [
+    ['memory-consolidation', 'incomplete', 'max-tokens'],
+  ])
+  assert.deepEqual(h.written.knowledge, [], 'no summary is stored for an unusable reply')
+})
+
+test('an aborted call keeps the provider reason in the error it throws', async () => {
+  // Recording must not change what the queue sees. `aborted` is the shape a
+  // timeout arrives in, so dropping `failure.message` would replace "request
+  // timed out after 120000ms" with a bare "aborted" in the task row.
+  const events = [
+    ev('user/message', 0, { source: { kind: 'user' }, content: [{ type: 'text', text: 'do the thing' }] }),
+    ev('assistant/message', 1, { turn: 1, message: { content: [{ type: 'text', text: 'done' }] } }),
+  ]
+  const modelLog = makeModelLogDouble()
+  const h = makeExecuteHarness({
+    events, maxInputTokens: 10_000, modelLog,
+    finishKind: 'aborted', finishFailure: 'request timed out after 120000ms',
+  })
+
+  await assert.rejects(
+    h.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 2, project: 'demo' }),
+    /consolidation model call failed: request timed out after 120000ms/,
+  )
+  assert.deepEqual(modelLog.attempts.map((a) => [a.purpose, ...a.done]), [
+    ['memory-consolidation', 'incomplete', 'request timed out after 120000ms'],
+  ])
+})
+
+test('a stop that parses into nothing is incomplete, and never quotes the reply', async () => {
+  // A stream that ends cleanly is not success: if the reply yields no summary,
+  // nothing is stored and the cursor is gone. `parseConsolidationOutput`'s
+  // message quotes the reply, so it must not become `detail` either.
+  const events = [
+    ev('user/message', 0, { source: { kind: 'user' }, content: [{ type: 'text', text: 'do the thing' }] }),
+    ev('assistant/message', 1, { turn: 1, message: { content: [{ type: 'text', text: 'done' }] } }),
+  ]
+  const modelLog = makeModelLogDouble()
+  const h = makeExecuteHarness({ events, maxInputTokens: 10_000, modelLog, replyText: 'Here is your summary: none' })
+
+  await assert.rejects(
+    h.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 2, project: 'demo' }),
+    PermanentConsolidationError,
+  )
+  assert.deepEqual(modelLog.attempts.map((a) => [a.purpose, ...a.done]), [
+    ['memory-consolidation', 'incomplete', 'unusable output'],
+  ])
+  assert.ok(!JSON.stringify(modelLog.attempts).includes('Here is your summary'), 'model output reached diagnostics')
+  assert.deepEqual(h.written.knowledge, [])
+})
+
+/** Minimal doubles for `adjudicate`, which needs only a route, a config and a stream. */
+function makeAdjudicateHarness({ replyText, finishKind = 'stop', throwError, modelLog }) {
+  const llm = {
+    async *stream() {
+      if (throwError !== undefined) throw throwError
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: replyText }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: replyText } }
+      yield { type: 'finish', reason: { kind: finishKind } }
+    },
+  }
+  return createConsolidator({
+    queue: {}, progress: {}, sessions: {}, llm, cli: {}, writer: {},
+    getConfig: () => ({
+      enabled: true,
+      consolidation: {
+        enabled: true, adjudicate: true, models: [{ provider: 'p', model: 'm' }],
+        maxInputTokens: 1000, maxOutputTokens: 200, timeoutMs: 1000,
+        checkEveryTurns: 5, minNewTokens: 100, maxWorkUnitsPerRun: 2,
+      },
+    }),
+    status: { warn: () => {}, info: () => {}, count: () => {}, error: () => {}, markConsolidated: () => {} },
+    modelLog,
+    projectFor: async () => 'demo',
+  })
+}
+
+const ADJUDICATE_UNIT = { title: 'New memory', content: 'body' }
+const ADJUDICATE_CANDIDATES = [{ name: 'wu-old', content: { data: 'old' } }]
+
+test('adjudication records the attempt and its route', async () => {
+  const modelLog = makeModelLogDouble()
+  const c = makeAdjudicateHarness({ replyText: '{"verdict":"refines","target":"wu-old"}', modelLog })
+
+  const decision = await c.adjudicate(ADJUDICATE_UNIT, ADJUDICATE_CANDIDATES)
+
+  assert.deepEqual(decision, { verdict: 'refines', target: 'wu-old' })
+  assert.deepEqual(modelLog.attempts.map((a) => [a.purpose, a.route, ...a.done]), [
+    ['memory-adjudication', { provider: 'p', model: 'm' }, 'ok', ''],
+  ])
+})
+
+test('an unparseable verdict is incomplete and never quotes the reply', async () => {
+  const modelLog = makeModelLogDouble()
+  const c = makeAdjudicateHarness({ replyText: 'Sure! The verdict is refines', modelLog })
+
+  assert.equal(await c.adjudicate(ADJUDICATE_UNIT, ADJUDICATE_CANDIDATES), undefined)
+  assert.deepEqual(modelLog.attempts.map((a) => [a.purpose, ...a.done]), [
+    ['memory-adjudication', 'incomplete', 'unparseable reply'],
+  ])
+  assert.ok(!JSON.stringify(modelLog.attempts).includes('Sure! The verdict'), 'model output reached diagnostics')
+})
+
+test('an adjudication call that throws is recorded as error', async () => {
+  const modelLog = makeModelLogDouble()
+  const c = makeAdjudicateHarness({ throwError: new Error('socket hang up'), modelLog })
+
+  await assert.rejects(c.adjudicate(ADJUDICATE_UNIT, ADJUDICATE_CANDIDATES), /socket hang up/)
+  assert.deepEqual(modelLog.attempts.map((a) => [a.purpose, ...a.done]), [
+    ['memory-adjudication', 'error', 'socket hang up'],
+  ])
 })
 
 test('consolidationStart never begins inside a fork\'s inherited prefix', () => {

@@ -19,6 +19,7 @@ import { countLoggableMessages, isCompactionReplacement, isLoggableMessage } fro
 import { messageName, summaryName } from './writer.js'
 import { EMPTY_PROGRESS, advanceProgress } from './progress.js'
 import { TaskDeferredError } from './queue.js'
+import { NULL_MODEL_LOG } from './model-log.js'
 
 export const PLUGIN_NAME = 'dsh-hypatia-auto-memory'
 
@@ -263,10 +264,11 @@ export function parseConsolidationOutput(raw, maxWorkUnits) {
  *   writer: ReturnType<import('./writer.js').createWriter>,
  *   getConfig: () => any,
  *   status: import('./status.js').StatusLog,
+ *   modelLog?: ReturnType<import('./model-log.js').createModelLog>,
  *   projectFor: (session: any) => Promise<string>,
  * }} deps
  */
-export function createConsolidator({ queue, progress, sessions, llm, cli, writer, getConfig, status, projectFor }) {
+export function createConsolidator({ queue, progress, sessions, llm, cli, writer, getConfig, status, modelLog = NULL_MODEL_LOG, projectFor }) {
   let warnedNoRoute = false
   const selectRoute = createConsolidationRouteSelector()
 
@@ -388,8 +390,11 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
       listed,
     ].join('\n')
 
+    const attempt = modelLog.begin('memory-adjudication', route)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), consolidation.timeoutMs)
+    let outcome = 'incomplete'
+    let detail = ''
     try {
       const { createUserMessage, BlockAssembler } = await import('@deepseek-ai/dsh-llm')
       const assembler = new BlockAssembler()
@@ -407,14 +412,34 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
       })) {
         assembler.push(chunk)
       }
-      if (assembler.finish.kind !== 'stop') return undefined
+      if (assembler.finish.kind !== 'stop') {
+        detail = String(assembler.finish.kind)
+        return undefined
+      }
       const text = assembler.blocks().filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim()
       const fence = /^```(?:json)?\s*([\s\S]*?)```\s*$/.exec(text)
-      const parsed = JSON.parse(fence ? fence[1].trim() : text)
-      if (typeof parsed?.verdict !== 'string') return undefined
+      // Its own catch: a parse failure is an unusable reply, not a failed call,
+      // and Node's parse error quotes the reply's opening characters.
+      let parsed
+      try {
+        parsed = JSON.parse(fence ? fence[1].trim() : text)
+      } catch {
+        detail = 'unparseable reply'
+        return undefined
+      }
+      if (typeof parsed?.verdict !== 'string') {
+        detail = 'no verdict'
+        return undefined
+      }
+      outcome = 'ok'
       return { verdict: parsed.verdict, target: typeof parsed.target === 'string' ? parsed.target : '' }
+    } catch (error) {
+      outcome = 'error'
+      detail = error instanceof Error ? error.message : String(error)
+      throw error
     } finally {
       clearTimeout(timer)
+      void attempt.finish(outcome, detail)
     }
   }
 
@@ -491,44 +516,84 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
     // watermark and the next trigger resumes from exactly there.
     const coveredToSeq = complete ? task.toSeq : lastSeq + 1
 
+    const attempt = modelLog.begin('memory-consolidation', route)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), consolidation.timeoutMs)
-    let assembled
+    let outcome = 'incomplete'
+    let detail = ''
+    let parsedOutput
     try {
-      const { createUserMessage, BlockAssembler } = await import('@deepseek-ai/dsh-llm')
-      const assembler = new BlockAssembler()
-      const request = createUserMessage({
-        content: [{ type: 'text', text: `${consolidationInstruction(consolidation.maxWorkUnitsPerRun)}\n\n<transcript>\n${transcript}\n</transcript>` }],
-        source: { kind: 'plugin', plugin: PLUGIN_NAME },
-      })
-      for await (const chunk of llm.stream({
-        provider: route.provider,
-        model: route.model,
-        system: 'You produce strict JSON only. You never add prose around it.',
-        messages: [request],
-        maxTokens: consolidation.maxOutputTokens,
-        purpose: 'memory-consolidation',
-        signal: controller.signal,
-      })) {
-        assembler.push(chunk)
+      let assembled
+      try {
+        const { createUserMessage, BlockAssembler } = await import('@deepseek-ai/dsh-llm')
+        const assembler = new BlockAssembler()
+        const request = createUserMessage({
+          content: [{ type: 'text', text: `${consolidationInstruction(consolidation.maxWorkUnitsPerRun)}\n\n<transcript>\n${transcript}\n</transcript>` }],
+          source: { kind: 'plugin', plugin: PLUGIN_NAME },
+        })
+        for await (const chunk of llm.stream({
+          provider: route.provider,
+          model: route.model,
+          system: 'You produce strict JSON only. You never add prose around it.',
+          messages: [request],
+          maxTokens: consolidation.maxOutputTokens,
+          purpose: 'memory-consolidation',
+          signal: controller.signal,
+        })) {
+          assembler.push(chunk)
+        }
+        assembled = assembler
+      } finally {
+        clearTimeout(timer)
       }
-      assembled = assembler
+      // The attempt stays open through parsing: a stream that ended with `stop`
+      // but yields no usable summary is `incomplete`, not `ok` — the cursor was
+      // consumed, nothing was stored, and a table that said otherwise would
+      // send a reader looking for a summary that does not exist. The throws are
+      // re-issued unchanged, so recording never changes which error the queue
+      // sees.
+      const finish = assembled.finish
+      if (finish.kind !== 'stop') {
+        // The thrown message is computed exactly as it was before this attempt
+        // was recorded: `error` AND `aborted` carry the provider's reason, and
+        // losing it for `aborted` would replace a timeout with a bare
+        // 'aborted' in the task row. `detail` uses the same message; `finish`
+        // caps it.
+        const message = finish.kind === 'error' || finish.kind === 'aborted'
+          ? finish.failure?.message ?? finish.kind
+          : finish.kind
+        if (finish.kind === 'error') outcome = 'error'
+        detail = String(message)
+        throw finish.kind === 'max-tokens'
+          ? new PermanentConsolidationError('consolidation hit the output token cap (truncated JSON)')
+          : new Error(`consolidation model call failed: ${message}`)
+      }
+      const text = assembled.blocks()
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n')
+      try {
+        parsedOutput = parseConsolidationOutput(text, consolidation.maxWorkUnitsPerRun)
+      } catch (parseError) {
+        // A parse failure is an unusable reply, not a failed call, and its
+        // message quotes the reply — so it never becomes `detail`. See the
+        // `detail` contract in model-log.js.
+        detail = 'unusable output'
+        throw parseError
+      }
+      outcome = 'ok'
+    } catch (error) {
+      // Only a throw that arrived with nothing classified is a failed call
+      // rather than an unusable reply.
+      if (outcome === 'incomplete' && detail === '') {
+        outcome = 'error'
+        detail = error instanceof Error ? error.message : String(error)
+      }
+      throw error
     } finally {
-      clearTimeout(timer)
+      void attempt.finish(outcome, detail)
     }
-    const finish = assembled.finish
-    if (finish.kind !== 'stop') {
-      if (finish.kind === 'max-tokens') {
-        throw new PermanentConsolidationError('consolidation hit the output token cap (truncated JSON)')
-      }
-      const message = finish.kind === 'error' || finish.kind === 'aborted' ? finish.failure?.message ?? finish.kind : finish.kind
-      throw new Error(`consolidation model call failed: ${message}`)
-    }
-    const text = assembled.blocks()
-      .filter((block) => block.type === 'text')
-      .map((block) => block.text)
-      .join('\n')
-    const { summary, workUnits } = parseConsolidationOutput(text, consolidation.maxWorkUnitsPerRun)
+    const { summary, workUnits } = parsedOutput
 
     const span = summaryName(task.sessionId, fromSeq, coveredToSeq)
     // The entries the log executor actually wrote for this span. Both sides

@@ -37,6 +37,7 @@ import { TaskDeferredError, createQueue } from './queue.js'
 import { countLoggableMessages, createCollector, formatSpan } from './collector.js'
 import { createCascade } from './cascade.js'
 import { createConsolidator, PLUGIN_NAME } from './consolidator.js'
+import { openModelLog } from './model-log.js'
 import { createRecall } from './recall.js'
 import { createPersistedSessions } from './persisted-session.js'
 import { createAutoApprove } from './auto-approve.js'
@@ -93,6 +94,20 @@ function applyCollect(ctx, cordisConfig) {
       progress: shelfTable(openedState.progress, shelf),
       tasks: shelfTable(openedState.tasks, shelf),
     }
+    // Which model a background attempt ran on is otherwise unknowable from
+    // outside the process: the cursor that picks it is process-local, the host
+    // logger scrolls away, and the usage ledger cannot see plugin calls. Kept in
+    // its own domain so a diagnostics row can never reject the open of the
+    // watermarks (see model-log.js). Not shelf-scoped: the route list is config,
+    // and the question is about this process, not this shelf.
+    const openedModelLog = await openModelLog(ctx, { status })
+    if (disposed) {
+      // Same race as the state domain above: if the fiber went away while this
+      // was opening, its disposer may never run, so close the handle here.
+      await openedModelLog.domain?.close().catch(() => {})
+      return
+    }
+    const modelLog = openedModelLog.modelLog
     let announcedShelf = shelf
     configHandle.onChange((value) => {
       if (value.shelf === announcedShelf) return
@@ -364,6 +379,7 @@ function applyCollect(ctx, cordisConfig) {
           writer,
           getConfig: configHandle.get,
           status,
+          modelLog,
           projectFor: collector.projectFor,
         })
         queue.registerExecutor('consolidate', consolidator.execute)
@@ -376,6 +392,7 @@ function applyCollect(ctx, cordisConfig) {
           selectRoute: consolidator.selectRoute,
           getConfig: configHandle.get,
           status,
+          modelLog,
         })
         queue.registerExecutor('cascade', cascade.execute)
         shared.consolidator = consolidator
