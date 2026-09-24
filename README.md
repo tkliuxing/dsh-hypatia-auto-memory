@@ -276,6 +276,12 @@ agent/session-start ──▶ rules/taboos inject()
   from the in-memory state tables on every poll, the shelf content only when it
   can have changed (on open, on a session switch, on a manual refresh, and when
   consolidation advances the session's watermark), cached for 15 s in between.
+  The tab polls every five seconds while it is on screen, and a response is
+  bounded: the newest 40 summaries and 40 work units, 4000 characters per body
+  and 120 000 per response. JSE has no `ORDER BY`, so "newest" is decided only
+  after reading every candidate; when a scan reaches its cap the counts become
+  lower bounds, and the tab reports that response as truncated rather than
+  leaving a short list unexplained.
   Two channels were rejected on the way here. A **session projection** would be
   the best shape, but the event that would drive it cannot be written from
   outside this repository: `Session.append` offers no way to set the envelope's
@@ -430,6 +436,7 @@ changes. No card claims it, so it renders nowhere; nothing ever writes to it.
 |---|---|
 | No entries after chatting | `enabled: false`, missing `hypatia` binary, or the collect fiber PENDING (needs `sessions`, `storageDomain`, `subprocess`, `settings` from the base composition) — check profile logs |
 | Nothing logged for a whole run after a restart | The storage domain refused to open because a stored record failed its schema. The storage service validates on read, not on write, so a bad write only surfaces at the next startup — and one bad row fails the whole domain. Look for `startup failed` / `does not match its schema` in the profile log. Task rows missing `error` are now defaulted; for any other bad row, stop DSH, remove it from `~/.dsh/storages/hypatia_auto_memory.json`, and restart |
+| Memory tab never shows data, or shows a read failure | The page is not reached over a **loopback origin**. The route authenticates itself — loopback socket, loopback `Host`, same-origin — so reading DSH from another device (a LAN address, or a `0.0.0.0` binding) is refused by design, and so is a tunnel presenting a public `Host`. Both halves of the payload are refused together, so the tab reports a load failure rather than partial data. Open the GUI at `127.0.0.1` or `localhost` |
 | Entries appear only after a turn finishes | By design: spans are cut at `turn/end`, or at the first `step/end` once a turn has run longer than `flushWindowMs`, so an entry never lacks its own tool results |
 | Logging works, no summaries | `consolidation.models` is empty or invalid — one warning at first trigger |
 | Summaries but no `sum2-*` | Fewer than `cascade.batchSize` unarchived tier-1 summaries in that project yet |
@@ -543,6 +550,8 @@ dsh-hypatia-auto-memory/
 │   ├── consolidator.js   # thresholds, prompt, llm.stream, validation
 │   ├── cascade.js        # log₁₆(n) hierarchical summary archive
 │   ├── model-log.js      # bounded record of which model each attempt ran on
+│   ├── memory-status.js  # per-session fold of the two state tables (pure)
+│   ├── memory-api.js     # the Memory tab: read-only route family + JSE reads
 │   ├── recall.js         # rules/taboos preload at session start
 │   ├── auto-approve.js   # approves the agent's own plain bash hypatia calls
 │   ├── skills.js         # bundled skill registration (never shadows another provider)
@@ -550,6 +559,8 @@ dsh-hypatia-auto-memory/
 │   └── client/           # settings card + Memory tab
 │       ├── index.tsx     # client plugin entry + slot registration
 │       ├── SettingsCard.tsx
+│       ├── MemoryView.tsx     # the Memory tab body
+│       ├── memory-client.ts   # its fetch + merge rules (pure)
 │       ├── shelves.ts    # shelf dropdown choices from the inventory namespace
 │       └── slot-contract.ts
 ├── lib/

@@ -215,7 +215,11 @@ agent/session-start ──▶ rules/taboos inject()
   数据经由本插件注册在 DSH web 服务器上的、会话作用域的只读 HTTP 路由
   `/api/dsh-hypatia-auto-memory/session` 到达浏览器：状态每次轮询都从内存中的状态表
   现算，shelf 内容只在可能变化时才读（打开时、切换会话时、手动刷新时，以及整合推进了
-  该会话水位时），其间缓存 15 秒。路上否掉了两条通道。**session projection** 形态最
+  该会话水位时），其间缓存 15 秒。标签页在屏幕上时每 5 秒轮询一次，响应是有界的：
+  最新的 40 条摘要与 40 条工作单元，每条正文 4000 字符、整份响应 120000 字符。
+  JSE 没有 `ORDER BY`，所以「最新」只能在读完所有候选之后判定；扫描触到上限时计数
+  变成下界，标签页会把该次响应标为已截断，而不是让短列表无从解释。路上否掉了两条
+  通道。**session projection** 形态最
   合适，但驱动它的事件在本仓库之外写不出来：`Session.append` 没有任何途径设置信封的
   `ignorable` 标记，而持久化读取路径会拒绝一个带着未知事件类型、又没有该标记的会话
   日志——所以自定义事件会破坏会话重载。**设置命名空间**能安全写入，但它是根作用域的：
@@ -348,6 +352,7 @@ rules/taboos 预载、启动清理。设置卡片把它做成 `hypatia list` 所
 |---|---|
 | 聊完没有条目 | `enabled: false`、缺少 `hypatia` 二进制、或 collect fiber 处于 PENDING（需要基础组合里的 `sessions`、`storageDomain`、`subprocess`、`settings`）——查 profile 日志 |
 | 重启后一整轮什么都没记录 | storage domain 因为某条已存记录不符合 schema 而拒绝打开。storage service 在读时校验、不在写时校验，所以一次坏写入只会在下次启动时暴露——而一条坏记录会拖垮整个 domain。在 profile 日志里找 `startup failed` / `does not match its schema`。缺 `error` 的任务行现在已默认化；其它坏行则停 DSH、从 `~/.dsh/storages/hypatia_auto_memory.json` 删除它再重启 |
+| 「记忆」标签页始终读不到数据，或显示读取失败 | 页面不是通过**回环来源**访问的。该路由自鉴权——回环 socket、回环 `Host`、同源——所以从另一台设备读 DSH（LAN 地址，或绑定 `0.0.0.0`）会被按设计拒绝，隧道送来公网 `Host` 也一样。响应两半一起被拒，所以标签页报的是读取失败而不是部分数据。请用 `127.0.0.1` 或 `localhost` 打开 GUI |
 | 条目只在 turn 结束后才出现 | 设计如此：span 在 `turn/end` 切分，或当 turn 跑得比 `flushWindowMs` 久时在第一个 `step/end` 切分，所以条目不会缺它自己的工具结果 |
 | 有记录，没摘要 | `consolidation.models` 为空或无效——首次触发时告警一次 |
 | 有摘要但没有 `sum2-*` | 该项目里未归档的 tier-1 摘要还不足 `cascade.batchSize` 条 |
@@ -439,6 +444,8 @@ dsh-hypatia-auto-memory/
 │   ├── consolidator.js   # 阈值、prompt、llm.stream、校验
 │   ├── cascade.js        # log₁₆(n) 分层摘要归档
 │   ├── model-log.js      # 每次尝试实际用了哪个模型的有界记录
+│   ├── memory-status.js  # 两张状态表按会话折叠（纯函数）
+│   ├── memory-api.js     # 记忆标签页：只读路由族 + JSE 读取
 │   ├── recall.js         # 会话启动时的 rules/taboos 预载
 │   ├── auto-approve.js   # 批准 Agent 自己的纯 bash hypatia 调用
 │   ├── skills.js         # 随包技能注册（从不遮蔽其它提供者）
@@ -446,6 +453,8 @@ dsh-hypatia-auto-memory/
 │   └── client/           # 设置卡片 + 记忆标签页
 │       ├── index.tsx     # client 插件入口 + slot 注册
 │       ├── SettingsCard.tsx
+│       ├── MemoryView.tsx     # 记忆标签页主体
+│       ├── memory-client.ts   # 它的请求与合并规则（纯函数）
 │       ├── shelves.ts    # 来自清单命名空间的 shelf 下拉选项
 │       └── slot-contract.ts
 ├── lib/
