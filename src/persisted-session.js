@@ -12,10 +12,19 @@
  * open on screen, because opening a transcript renders persisted events without
  * publishing a Session.
  *
- * `sessionPersistence.load(id)` returns that same log without publishing
- * anything, and the executors only ever use four members of a Session —
+ * `sessionPersistence.open(id, 'read')` returns that same log without publishing
+ * anything — the canonical read-only path, the one DSH's own `message-feedback`
+ * uses — and the executors only ever use four members of a Session —
  * `snapshotEvents`, `inheritedEventCount`, `seq`, `header`. So storage can
  * serve them directly, and a tail nothing will reopen still becomes knowledge.
+ *
+ * The handle is the only correct entry point: the service exposes
+ * `create`/`open`/`flush`/`stat`/`list` and nothing else. An earlier revision
+ * called `persistence.load(id)`, which does not exist — the TypeError was
+ * swallowed by this module's own read-failure guard, so EVERY unloaded session
+ * resolved to "no session" and its queued consolidation stayed `deferred`
+ * forever. A missing method looked exactly like a session that had never been
+ * written, which is why the silent-defer bug survived so long.
  *
  * @module dsh-hypatia-auto-memory/persisted-session
  */
@@ -58,7 +67,14 @@ export function toReadOnlySession(inspection) {
  * half-consolidated span written from a partial log.
  *
  * @param {{
- *   persistence: {load: (id: string) => Promise<any>},
+ *   persistence: {
+ *     open: (id: string, access: 'read') => Promise<{
+ *       header: any,
+ *       inheritedEventCount?: number,
+ *       read: (offset?: number, length?: number) => Promise<{events: readonly any[]}>,
+ *       close: () => Promise<void>,
+ *     }>,
+ *   },
  *   status: import('./status.js').StatusLog,
  *   cacheSize?: number,
  * }} deps
@@ -75,14 +91,27 @@ export function createPersistedSessions({ persistence, status, cacheSize = DEFAU
     async get(sessionId) {
       const cached = cache.get(sessionId)
       if (cached !== undefined) return cached
-      let loaded
+      let session
+      let handle
       try {
-        loaded = await persistence.load(sessionId)
+        handle = await persistence.open(sessionId, 'read')
+        const { events } = await handle.read()
+        session = toReadOnlySession({
+          meta: handle.header,
+          inheritedEventCount: handle.inheritedEventCount,
+          events,
+        })
       } catch (error) {
+        // A read failure is reported and treated as "no session": the caller
+        // then defers exactly as before, which is the correct degradation —
+        // never a half-consolidated span written from a partial log.
         status.warn(`persisted session ${sessionId} could not be read: ${String(error)}`)
         return undefined
+      } finally {
+        // The read is done with the handle either way; a read handle holds
+        // backend state (an open file, a lock) that must not leak per lookup.
+        await handle?.close?.().catch(() => {})
       }
-      const session = toReadOnlySession(loaded)
       if (session === undefined) return undefined
       cache.set(sessionId, session)
       // One entry is a whole event log; evict in insertion order.

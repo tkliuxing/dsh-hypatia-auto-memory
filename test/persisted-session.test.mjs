@@ -37,20 +37,50 @@ test('a malformed inspection yields no session rather than an empty one', () => 
   assert.equal(toReadOnlySession({ meta: {} }), undefined)
 })
 
+/**
+ * A handle-serving double for `sessionPersistence`, closing over the log it returns.
+ * @param events - events the handle's `read()` answers with.
+ */
+function persistenceDouble(events = log(3)) {
+  const calls = { opened: [], read: 0, closed: 0 }
+  const persistence = {
+    async open(id, access) {
+      calls.opened.push([id, access])
+      return {
+        header: { id, cwd: '/w' },
+        inheritedEventCount: 0,
+        async read() { calls.read += 1; return { events } },
+        async close() { calls.closed += 1 },
+      }
+    },
+  }
+  return { persistence, calls }
+}
+
 test('a session is loaded once and served from cache', async () => {
-  let loads = 0
-  const persistence = { load: async () => { loads += 1; return { meta: {}, inheritedEventCount: 0, events: log(3) } } }
+  const { persistence, calls } = persistenceDouble()
   const sessions = createPersistedSessions({ persistence, status: quiet() })
 
   const first = await sessions.get('a')
   const second = await sessions.get('a')
-  assert.equal(loads, 1)
+  assert.deepEqual(calls.opened, [['a', 'read']], 'one read-only handle, then the cache')
+  assert.equal(calls.closed, 1)
   assert.equal(first, second)
 })
 
 test('the cache is bounded — one entry is a whole event log', async () => {
   const seen = []
-  const persistence = { load: async (id) => { seen.push(id); return { meta: {}, inheritedEventCount: 0, events: log(2) } } }
+  const persistence = {
+    async open(id) {
+      seen.push(id)
+      return {
+        header: { id },
+        inheritedEventCount: 0,
+        async read() { return { events: log(2) } },
+        async close() {},
+      }
+    },
+  }
   const sessions = createPersistedSessions({ persistence, status: quiet(), cacheSize: 2 })
 
   await sessions.get('a')
@@ -64,10 +94,47 @@ test('a read failure defers exactly as an unloaded session does', async () => {
   // Never a span consolidated from a partial log: no session, no work.
   const status = quiet()
   const sessions = createPersistedSessions({
-    persistence: { load: async () => { throw new Error('storage is down') } },
+    persistence: { open: async () => { throw new Error('storage is down') } },
     status,
   })
 
   assert.equal(await sessions.get('a'), undefined)
   assert.match(status.lines[0], /persisted session a could not be read: .*storage is down/)
+})
+
+test('a handle is closed even when its read fails', async () => {
+  // A read handle holds backend state (an open file, a lock); leaking one per
+  // lookup would strand the log it was opened for.
+  let closed = 0
+  const sessions = createPersistedSessions({
+    persistence: {
+      open: async (id) => ({
+        header: { id },
+        inheritedEventCount: 0,
+        async read() { throw new Error('log is corrupt') },
+        async close() { closed += 1 },
+      }),
+    },
+    status: quiet(),
+  })
+
+  assert.equal(await sessions.get('a'), undefined)
+  assert.equal(closed, 1)
+})
+
+test('the service surface a wrong call would miss is exercised', async () => {
+  // The bug this covers: this module used to call `persistence.load(id)`, which
+  // the service does not expose (`create`/`open`/`flush`/`stat`/`list` only).
+  // The TypeError was swallowed by the read-failure guard, so every unloaded
+  // session looked like one that had never been written and its consolidation
+  // stayed deferred forever. Asserting the entry point by name is what keeps a
+  // rename in dsh from silently degrading into "no session" again.
+  const { persistence, calls } = persistenceDouble(log(4))
+  const sessions = createPersistedSessions({ persistence, status: quiet() })
+
+  const session = await sessions.get('s1')
+
+  assert.deepEqual(calls.opened, [['s1', 'read']], 'opened read-only')
+  assert.equal(calls.read, 1)
+  assert.equal(session.seq, 4, 'the stored log answered the range, rather than resolving to nothing')
 })

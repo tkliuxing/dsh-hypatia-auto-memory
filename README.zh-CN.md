@@ -201,7 +201,7 @@ agent/session-start ──▶ rules/taboos inject()
   这些任务随后从 **storage** 读取事件，而不只是从活 store。`session/created`——唤醒
   被延迟任务的信号——只在 Agent 实际运行的地方触发，所以一个已结束的会话可能再也不
   会发它，而 subagent 会话（侧栏甚至不列出）几乎肯定不会：有一个就曾跨重启停留在
-  `deferred` 状态，尽管它的 transcript 正开在屏幕上。`sessionPersistence.load()`
+  `deferred` 状态，尽管它的 transcript 正开在屏幕上。`sessionPersistence.open(id, 'read')`
   返回同样的日志而不发布任何东西，执行器只用 `snapshotEvents`、
   `inheritedEventCount`、`seq` 和 `header`，所以一个不会再被重新打开的尾部仍能变成
   知识。没有 `sessionPersistence` 的组合行为照旧：任务等待。
@@ -399,7 +399,7 @@ shelf 清单本来就不是配置，而设置域现在只投影插件的 Config 
 | 有摘要但没有 `sum2-*` | 该项目里未归档的 tier-1 摘要还不足 `cascade.batchSize` 条 |
 | 工作单元没有关系 | shelf 没有嵌入模型（`similar` 失败），所有候选都超过了 `dedupMaxDistance`，或裁决调用本身没有产出裁决——`model_calls` 里表现为 `incomplete` / `max-tokens`，也就是开启了思考的路由把整个输出预算花在推理上、还没开始作答就撞了上限。现在裁决会先确认适配器声明了 `off`，再对该路由请求 `reasoningEffort: 'off'`；对无法接受它的路由则把上限提到 1024。自 hypatia #19 起，本地模型在 `~/.hypatia/models/<org>/<name>`（或 Hugging Face 缓存）里找，不再挨着 shelf：一个以前能回答 `similar`、现在说 `is not installed` 的 shelf，需要 `hypatia model install <model>`，或 `hypatia model register <model> <dir>` 指向它已有的文件 |
 | `similar` 仍返回 `msg-*` 行 | 它们是在本插件让日志层退出嵌入之前写的，或由一个没有 `--no-embed` 的 hypatia 写的。在 shelf 的 `shelf.toml` 里用 `embedding.skip_tags = ["message"]` 加一次 `hypatia backfill` 一次性收回知识向量（比该 key 旧的二进制会拒绝打开 shelf，所以先升级所有共享它的二进制）。不要把 `session` 加进那个列表：`skip_tags` 匹配任何带该 tag 的条目，而人们写的关于会话的知识也带它——在试过的 shelf 上就有一条这样的条目丢了向量。插件自己的 `session-*` 节点很少，现在已逐次写入退出。三元组没有 tags 也没有 update 命令，所以之前写的 `belongTo` / `summary` 边保留向量 |
-| 任务处于 `deferred` 状态 | live store 和 persistence 都没能提供它的会话。不是错误：它不消耗尝试次数，一旦二者之一能提供就运行。通常 storage 立即回答——只有组合里没有 `sessionPersistence`，或它的读取失败（日志里找 `could not be read`）时才会持久化这个状态 |
+| 任务处于 `deferred` 状态 | live store 和 persistence 都没能提供它的会话。不是错误：它不消耗尝试次数，一旦二者之一能提供就运行。通常 storage 立即回答——只有组合里没有 `sessionPersistence`，或它的读取失败（日志里找 `could not be read`）时才会持久化这个状态。被 deferred 的巩固任务会在下次启动时被 backfill 重新入队，所以它不必等会话被重新打开 |
 | 任务处于 `failed` 状态 | 一次 hypatia 或模型错误在 `maxAttempts` 之后持久化了。失败的 `log-message` 记录在下次启动时被修剪，因为水位会重新推导它们的范围；其它类型保留供检查——删掉一条好让下一个触发器重新创建它 |
 | 水位说已记录，但 shelf 里没条目 | shelf 在记录后被重置或切换。启动时处理：`housekeeping.reconcileOnStartup` 重置任何 session 已无 `msg-*` 的行，该会话下次活跃时从头重新记录——并重新巩固。shelf 查询失败则不动该行。一个所有消息都被故意删除的会话无法区分，会被重新记录；如果这要紧，关掉这个开关 |
 | 警告 `hypatia mcp unavailable: …; using the hypatia CLI until the profile reloads` | 二进制早于 `hypatia mcp`（消息会引用它的 `unrecognized subcommand`）、缺本插件调用的某工具、或握手返回错误。一切继续走 CLI；升级 hypatia 并重载 profile 以使用 MCP |
