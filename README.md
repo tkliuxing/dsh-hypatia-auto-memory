@@ -1,5 +1,7 @@
 # dsh-hypatia-auto-memory
 
+> 中文：[README.zh-CN.md](./README.zh-CN.md)
+
 Event-driven [Hypatia](https://github.com/tkliuxing/hypatia) memory for
 [DSH](https://github.com/deepseek-ai/deepseek-harness): automatic conversation
 logging and background consolidation — span summaries, a log₁₆(n) archive
