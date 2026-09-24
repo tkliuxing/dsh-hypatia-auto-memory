@@ -2,3 +2,6 @@ node_modules
 .DS_Store
 *.log
 coverage
+
+# 从私有 hypatia shelf 抽取的实验数据，可由 extract-*.mjs 重新生成，不入库
+docs/jev-decision-model-research-scripts/*.json
