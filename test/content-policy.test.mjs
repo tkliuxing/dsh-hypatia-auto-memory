@@ -110,12 +110,14 @@ test('blocksToText flattens content blocks', () => {
     { type: 'text', text: 'hello' },
     { type: 'image' },
     { type: 'thinking', text: 'hmm' },
+    { type: 'reasoning', text: 'hmm' },
     { type: 'other' },
   ]
   const out = blocksToText(blocks)
   assert.ok(out.includes('hello'))
   assert.ok(out.includes('[image]'))
-  assert.ok(out.includes('[thinking: hmm]'))
+  assert.ok(!out.includes('thinking'), 'thinking is internal monologue, not logged')
+  assert.ok(!out.includes('reasoning'), 'reasoning is internal monologue, not logged')
   assert.ok(out.includes('[other]'))
 })
 

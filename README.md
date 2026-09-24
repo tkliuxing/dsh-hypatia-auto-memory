@@ -124,15 +124,15 @@ agent/session-start ──▶ rules/taboos inject()
   secrets, rewrites relative dates against the time the message was sent, caps
   both user and assistant text, and enqueues idempotent log tasks.
 
-  Each assistant message carries a ledger of its own step's tool calls in the
-  shape the hypatia-memory protocol asks for — what was called, how long it
-  took, whether it worked, and one line of error on failure — **never the
-  output** (`1. \`read\` ×5 — ✅ 1.2s total`). Tool outputs had been 84% of all
-  stored message bytes, mostly file paths and contents, and made unrelated
-  keyword searches match chat logs. Tool-call blocks leave no `[tool-call]`
-  placeholder in the content; a step that only called tools says
-  `(tool calls only)`. Plugin-sourced
-  messages are skipped — no feedback loops.
+  Tool-call, thinking and reasoning blocks are internal to the model and leave
+  no placeholder in the content. Assistant turns whose only output is one of
+  those (tool calls only, empty reasoning marker, etc.) produce no `msg-*`
+  entry at all — there is nothing substantive to remember. Plugin-sourced
+  messages are skipped — no feedback loops. By default no tool-call ledger is
+  written at all; set `hypatia-auto-memory.collector.toolLedger: true` to record
+  a compact ledger (`1. \`read\` ×5 — ✅ 1.2s total`) for assistant messages that
+  do have text/image content. In either mode **tool outputs themselves are never
+  stored** in the log layer.
 
 - **The log layer is not embedded.** `msg-*` and `session-*` entries and the
   `belongTo` / `summary` edges are written `embed: false` (hypatia #26): stored,

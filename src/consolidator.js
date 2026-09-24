@@ -14,7 +14,7 @@
  * @module dsh-hypatia-auto-memory/consolidator
  */
 
-import { absolutizeDates, blocksToText, eventDate, flattenToolResult, redactSecrets } from './content-policy.js'
+import { absolutizeDates, blocksToText, eventDate, redactSecrets } from './content-policy.js'
 import { countLoggableMessages, isCompactionReplacement, isLoggableMessage } from './collector.js'
 import { messageName, summaryName } from './writer.js'
 import { EMPTY_PROGRESS, advanceProgress } from './progress.js'
@@ -178,8 +178,11 @@ export function buildTranscript(events, config, now = new Date(), { before } = {
       const callId = event.data?.message?.source?.callId
       const name = toolNames.get(callId) ?? 'tool'
       const ok = event.data?.error === undefined
-      const first = clean(flattenToolResult(event), event).split('\n')[0] ?? ''
-      entries.push({ seq: event.seq, line: `T: ${name} ${ok ? '✅' : '❌'} ${first}`.trimEnd() })
+      // Tool outputs are intentionally kept out of the consolidation transcript.
+      // The model only sees that a tool was called and whether it succeeded;
+      // the actual result text never reaches the remote model or the summaries
+      // and work units derived from it.
+      entries.push({ seq: event.seq, line: `T: ${name} ${ok ? '✅' : '❌'}` })
     }
   }
 

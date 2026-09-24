@@ -30,7 +30,9 @@ test('buildTranscript renders roles and folds tool outcomes', () => {
   assert.equal(complete, true)
   assert.ok(out.includes('U: fix the bug'))
   // The tool's readable NAME, resolved from the paired tool/call — not its callId.
-  assert.ok(out.includes('T: grep ✅ found 3 matches'))
+  // Tool outputs themselves are not fed to the consolidation model.
+  assert.ok(out.includes('T: grep ✅'))
+  assert.ok(!out.includes('found 3 matches'))
   assert.ok(out.includes('A: done'))
   assert.ok(!out.includes('ctx'))
 })
@@ -52,7 +54,8 @@ test('buildTranscript unwraps nested tool-result blocks', () => {
     }),
   ]
   const { text: out } = buildTranscript(events, { maxInputTokens: 10000 })
-  assert.ok(out.includes('T: read_file ✅ line one'), out)
+  assert.ok(out.includes('T: read_file ✅'), out)
+  assert.ok(!out.includes('line one'), out)
 })
 
 test('buildTranscript redacts secrets and absolutizes dates before the model call', () => {

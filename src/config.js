@@ -35,7 +35,11 @@ export const DEFAULTS = {
     // User messages were never capped, so a pasted log went into hypatia whole.
     // Generous, because what the user typed is the part most worth keeping.
     maxUserChars: 32000,
-    toolLedger: true,
+    // Tool-call ledgers (name / count / success / duration) are intentionally
+    // off by default: they still reveal which tools were used and when, and the
+    // user has asked to avoid writing any tool-call-derived data to hypatia.
+    // Set this to true to restore the previous behavior.
+    toolLedger: false,
   },
   consolidation: {
     enabled: true,

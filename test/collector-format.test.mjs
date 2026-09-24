@@ -117,7 +117,7 @@ test('countLoggableMessages gives the ordinal a span continues from', () => {
   const prefix = [
     ev('user/message', 0, { source: { kind: 'user' }, content: [] }),
     ev('assistant/chunk', 1, {}),
-    ev('assistant/message', 2, { turn: 1, message: { content: [] } }),
+    ev('assistant/message', 2, { turn: 1, message: { content: [{ type: 'text', text: 'a' }] } }),
     ev('user/message', 3, { source: { kind: 'plugin', plugin: 'p' }, content: [] }),
   ]
   assert.equal(countLoggableMessages(prefix), 2)
@@ -136,7 +136,11 @@ test('countLoggableMessages gives the ordinal a span continues from', () => {
 test('isLoggableMessage is the single predicate both writers share', () => {
   // The consolidator derives link targets with this same predicate, so a
   // divergence here would silently produce edges pointing at absent entries.
-  assert.equal(isLoggableMessage(ev('assistant/message', 0, {})), true)
+  assert.equal(isLoggableMessage(ev('assistant/message', 0, { message: { content: [{ type: 'text', text: 'hi' }] } })), true)
+  assert.equal(isLoggableMessage(ev('assistant/message', 0, { message: { content: [] } })), false)
+  assert.equal(isLoggableMessage(ev('assistant/message', 0, { interrupted: true, message: { content: [] } })), true)
+  assert.equal(isLoggableMessage(ev('assistant/message', 0, { message: { content: [{ type: 'reasoning', text: 'hmm' }] } })), false)
+  assert.equal(isLoggableMessage(ev('assistant/message', 0, { message: { content: [{ type: 'reasoning', text: '' }, { type: 'text', text: 'hi' }] } })), true)
   assert.equal(isLoggableMessage(ev('user/message', 0, { source: { kind: 'user' } })), true)
   assert.equal(isLoggableMessage(ev('user/message', 0, { source: { kind: 'plugin' } })), false)
   assert.equal(isLoggableMessage(ev('tool/result', 0, {})), false)
@@ -239,15 +243,14 @@ test('the ledger records what was called, how long, and whether it worked — ne
   assert.ok(!entry.markdown.includes('[tool-call]'), 'no placeholder for the call itself')
 })
 
-test('a step that only calls tools says so instead of storing placeholders', () => {
+test('a step that only calls tools produces no msg-* entry', () => {
   const events = [
     ev('assistant/message', 1, { turn: 1, step: 1, message: { content: [{ type: 'tool-call', id: 'g', name: 'grep', arguments: '{}' }] } }),
     ev('tool/call', 2, { turn: 1, step: 1, callId: 'g', name: 'grep' }),
     ev('tool/result', 3, { turn: 1, step: 1, message: { source: { callId: 'g' }, content: [] } }),
   ]
-  const [entry] = formatSpan(events, { now: NOW })
-  assert.match(entry.markdown, /## Content\n\(tool calls only\)/)
-  assert.ok(!entry.markdown.includes('[tool-call]'))
+  const out = formatSpan(events, { now: NOW })
+  assert.equal(out.length, 0, 'tool-call-only assistant turns are not logged')
 })
 
 test('formatDuration stays human-scale', () => {

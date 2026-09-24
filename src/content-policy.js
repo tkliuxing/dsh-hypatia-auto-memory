@@ -277,7 +277,11 @@ export function blocksToText(blocks) {
   for (const block of blocks ?? []) {
     if (block.type === 'text') parts.push(block.text)
     else if (block.type === 'image') parts.push('[image]')
-    else if (block.type === 'thinking') parts.push(`[thinking: ${String(block.text ?? '').slice(0, 200)}]`)
+    // Thinking / reasoning blocks are internal monologue, not something the
+    // assistant said to the user. Including them created `[reasoning]`
+    // placeholder entries with no substantive content; skip them so only the
+    // final text / image output reaches the log.
+    else if (block.type === 'thinking' || block.type === 'reasoning') continue
     else if (block.type === 'tool-result') parts.push(blocksToText(block.content ?? []))
     // A tool-call block is the model asking for a tool, not something it said.
     // Rendered as `[tool-call]` it filled the content of half the stored

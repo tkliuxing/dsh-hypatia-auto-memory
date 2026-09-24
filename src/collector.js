@@ -60,17 +60,43 @@ const RECORDED_TYPES = new Set([
 ])
 
 /**
+ * Whether an assistant/message event carries anything worth logging on its own.
+ *
+ * A turn that only issued tool calls (no text, no reasoning, no interruption
+ * marker) adds nothing to the conversation record — the tool outcomes already
+ * live in the session log if needed. Skipping these avoids msg-* entries whose
+ * entire body would be `(tool calls only)` or an empty placeholder.
+ *
+ * @param {any} event
+ * @returns {boolean}
+ */
+function hasAssistantContent(event) {
+  const blocks = event.data?.message?.content ?? []
+  for (const block of blocks) {
+    if (block.type === 'text' && String(block.text ?? '').trim() !== '') return true
+    if (block.type === 'image') return true
+  }
+  return false
+}
+
+/**
  * Whether this event becomes one `msg-*` entry.
  *
  * Plugin-sourced user messages (injected context, including this plugin's own
  * output) are excluded: they are not things the human said, and re-logging them
  * would let memory amplify into itself.
  *
+ * Assistant turns whose only content is tool calls are also excluded: they have
+ * no substantive message to remember.
+ *
  * @param {any} event
  * @returns {boolean}
  */
 export function isLoggableMessage(event) {
-  if (event?.type === 'assistant/message') return true
+  if (event?.type === 'assistant/message') {
+    const interrupted = event.data?.interrupted === true
+    return interrupted || hasAssistantContent(event)
+  }
   return event?.type === 'user/message' && event.data?.source?.kind === 'user'
 }
 
