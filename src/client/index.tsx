@@ -1,7 +1,12 @@
 /**
- * Browser half of dsh-hypatia-auto-memory: contributes a settings tab inside
- * Settings → Plugins, keyed by the `hypatia-auto-memory` namespace, and a
- * per-session Memory tab beside the conversation's Chat and Trajectory tabs.
+ * Browser half of dsh-hypatia-auto-memory: contributes the configuration card
+ * for the `hypatia-auto-memory` namespace, and a per-session Memory tab beside
+ * the conversation's Chat and Trajectory tabs.
+ *
+ * The card's seat depends on the harness: the sidebar Plugins page owns a
+ * bundle's configuration from dsh 0.1.7 on, and the Settings tab is the fallback
+ * for a deployment that does not render that page. `plugin-card-seat.ts` makes
+ * that choice and keeps the card in one seat.
  *
  * The Host plugin already registers the schema and namespace; this half only
  * renders the form and routes edits through `ctx.configForms`. The Memory tab
@@ -26,7 +31,11 @@ import type { LoadConsolidationModelCatalog } from './consolidation-models'
 import { MemoryView } from './MemoryView'
 import { fetchMemory, fetchShelves } from './memory-client'
 import type { LoadShelfInventory } from './shelves'
+import { BUNDLE_CONFIG_SEAT, SETTINGS_TAB_SEAT, installPluginCard } from './plugin-card-seat'
 import { en, NS, zh } from './locales'
+
+/** The bundle's npm package name: the key the official seat identifies it by. */
+const BUNDLE_NAME = 'dsh-hypatia-auto-memory'
 
 const APPLY_CLAIM = '__dshHypatiaAutoMemoryApplied'
 
@@ -89,16 +98,25 @@ export function apply(ctx: Context): void {
     loadShelfInventory,
     ...props,
   })
-  // The tab exists only while the Host serves our namespace; whileServed owns
-  // the watch and hands us a disposer for the live registration.
+  // The card exists only while the Host serves our namespace; whileServed owns
+  // the watch and hands us a disposer for whichever seat is live. Both
+  // registrations are written plainly and the installer catches the refusal an
+  // undeclared seat throws — a harness without the Plugins page answers that way.
   const unregister = ctx.effect(() => configForms.whileServed([NS], () =>
-    ctx.slots.inject('settings.plugins.tab', () =>
-      ctx.slots.register(
-        { name: 'settings.plugins.tab', id: NS, label: () => t('title'), locale: NS },
+    installPluginCard(ctx, {
+      official: () => ctx.slots.register(
+        { name: BUNDLE_CONFIG_SEAT, key: BUNDLE_NAME, locale: NS },
         renderCard,
       ),
-    ),
-  ), 'dsh-hypatia-auto-memory: plugins settings tab')
+      settingsTab: () => ctx.slots.register(
+        { name: SETTINGS_TAB_SEAT, id: NS, label: () => t('title'), locale: NS },
+        renderCard,
+      ),
+      onRefused: (seat, error) => {
+        console.warn(`[${BUNDLE_NAME}] configuration card refused by slot "${seat}"`, error)
+      },
+    }),
+  ), 'dsh-hypatia-auto-memory: configuration card seat')
 
   // The Memory tab's data: one same-origin request to the route family this
   // plugin's Host half registers (see `src/memory-api.js`) — the same family

@@ -33,6 +33,17 @@ additions are used when the binary has them and skipped when it does not:
 The first call logs which the binary offers
 (`hypatia over mcp: no-embed yes, similar filters yes`).
 
+The plugin also needs **dsh ≥ 0.1.7**, and dsh enforces that itself rather than
+this README: the package declares
+`peerDependencies["@deepseek-ai/dsh"]: ">=0.1.7-rc.1"` (the same range also
+sits under `dsh.engines.dsh` for display), and dsh checks every
+`@deepseek-ai/dsh*` peer against the running version when a bundle is installed
+and again at startup — an older runtime refuses the install instead of loading a
+plugin built for API it does not have, and `dsh plugin allow-version` grants an
+exact-version exemption when the risk is accepted deliberately. The peer is
+marked optional in `peerDependenciesMeta` so that neither npm nor a profile
+installation pulls the runtime in as a dependency: the launcher supplies it.
+
 ```bash
 # from a local checkout (development)
 dsh plugin --profile web add link:/path/to/dsh-hypatia-auto-memory
@@ -304,9 +315,13 @@ agent/session-start ──▶ rules/taboos inject()
 
 ## Configuration
 
-The plugin's cordis `Config` is its settings tab (dsh ≥ 0.1.7 projects a
-plugin's Config schema into Settings → Plugins; every field below applies on
-save, without a profile reload). Stored as the plugin entry's `config:` in the
+The plugin's cordis `Config` is its configuration form. dsh ≥ 0.1.7 projects a
+plugin's Config schema onto the sidebar's **Plugins** page, and the card renders
+on this bundle's own page there; a deployment whose profile renders no Plugins
+page gets the same card as a tab under **Settings → Built-in plugins**. The card
+takes whichever seat exists and moves between them without ever appearing twice
+(`src/client/plugin-card-seat.ts`). Every field below applies on
+save, without a profile reload. Stored as the plugin entry's `config:` in the
 profile patch; a pre-0.1.7 `settings.yaml` section is imported once on first
 launch. All fields optional, defaults shown. A blank consolidation route is
 refused on save; a duplicate one is dropped at runtime with a warning:
@@ -572,7 +587,8 @@ dsh-hypatia-auto-memory/
 │       ├── SettingsCard.tsx
 │       ├── MemoryView.tsx     # the Memory tab body
 │       ├── memory-client.ts   # its fetch + merge rules (pure)
-│       ├── shelves.ts    # shelf dropdown choices from the inventory namespace
+│       ├── plugin-card-seat.ts # card seat: official Plugins page, else Settings tab
+│       ├── shelves.ts    # shelf dropdown choices (listing from the /shelves route)
 │       └── slot-contract.ts
 ├── lib/
 │   └── client.js         # built browser factory (commit this)

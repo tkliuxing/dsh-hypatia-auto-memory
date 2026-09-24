@@ -28,6 +28,14 @@
 检索。首次调用会记录二进制提供了哪些（`hypatia over mcp: no-embed yes, similar
 filters yes`）。
 
+本插件还需要 **dsh ≥ 0.1.7**，而且这个下限由 dsh 自己强制执行，不靠本 README：
+包里声明了 `peerDependencies["@deepseek-ai/dsh"]: ">=0.1.7-rc.1"`（同样的范围也写在
+`dsh.engines.dsh` 里，供展示），dsh 在安装 bundle 时、以及每次启动时，会把每个
+`@deepseek-ai/dsh*` peer 与自身版本比对——运行时太旧会直接拒绝安装，而不是加载一个
+面向它并不具备的 API 写成的插件；确实要接受风险时，用 `dsh plugin allow-version`
+授予精确版本豁免。该 peer 在 `peerDependenciesMeta` 里标为 optional，这样 npm 和
+profile 安装都不会把运行时本身拉成依赖：运行时由 launcher 提供。
+
 ```bash
 # 从本地 checkout 安装（开发）
 dsh plugin --profile web add link:/path/to/dsh-hypatia-auto-memory
@@ -235,8 +243,11 @@ agent/session-start ──▶ rules/taboos inject()
 
 ## 配置
 
-插件的 cordis `Config` 就是它的设置页（dsh ≥ 0.1.7 把插件的 Config schema 投影到
-「设置 → 插件」；下面每个字段保存即生效，无需重载 profile）。配置以插件条目 `config:`
+插件的 cordis `Config` 就是它的配置表单。dsh ≥ 0.1.7 把插件的 Config schema 投影到
+侧边栏的**「插件」页**，卡片渲染在该 bundle 自己的页面上；如果某个部署的 profile
+不渲染这个页面，同一张卡片会退到**「设置 → 内置插件」**里作为一个标签页。卡片落在
+存在的那个位置上，并在两者之间迁移时绝不会同时出现（`src/client/plugin-card-seat.ts`）。
+下面每个字段保存即生效，无需重载 profile。配置以插件条目 `config:`
 的形式存进 profile patch；0.1.7 之前的 `settings.yaml` 段落会在首次启动时被一次性导入。
 所有字段可选，展示的是默认值。空白的巩固路由在保存时就被拒绝；重复的路由在运行时被丢弃
 并记一条警告：
@@ -461,6 +472,7 @@ dsh-hypatia-auto-memory/
 │       ├── SettingsCard.tsx
 │       ├── MemoryView.tsx     # 记忆标签页主体
 │       ├── memory-client.ts   # 它的请求与合并规则（纯函数）
+│       ├── plugin-card-seat.ts # 卡片落座：官方「插件」页，否则设置标签页
 │       ├── shelves.ts    # shelf 下拉选项（清单来自 /shelves 路由）
 │       └── slot-contract.ts
 ├── lib/

@@ -1,5 +1,6 @@
 /**
- * Settings card for the `hypatia-auto-memory` namespace.
+ * Configuration card for the `hypatia-auto-memory` namespace, rendered on
+ * whichever seat the harness offers (see `plugin-card-seat.ts`).
  *
  * The card owns its disclosure state and stages edits until Save. Its visual
  * treatment mirrors the DSH plugin-settings cards while remaining bundle-local.
