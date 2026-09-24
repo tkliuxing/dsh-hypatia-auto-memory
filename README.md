@@ -287,11 +287,10 @@ agent/session-start ──▶ rules/taboos inject()
   outside this repository: `Session.append` offers no way to set the envelope's
   `ignorable` marker, and the persistence read path refuses a session log
   carrying an unknown event type without it — so a custom event would break
-  session reload. A **settings namespace** can be written safely but is
-  root-scoped: the Host cannot know which session the browser is showing, so it
-  would have to ship every session's data, and publishing means disposing and
-  re-creating the owning fiber, because `settings.register` refuses a duplicate
-  namespace and has no way to update a registered `base`.
+  session reload. A **settings namespace** was root-scoped even when it existed:
+  the Host cannot know which session the browser is showing, so it would have
+  to ship every session's data. (dsh 0.1.7 removed the Host-side settings
+  registration API entirely; the route family below is now the only channel.)
 
   The route is not one of the composed app's authenticated routes — a route a
   plugin registers never is — so it authenticates itself the way
@@ -305,8 +304,12 @@ agent/session-start ──▶ rules/taboos inject()
 
 ## Configuration
 
-Settings namespace `hypatia-auto-memory` (edit `settings.yaml` or Web
-settings; all fields optional, defaults shown):
+The plugin's cordis `Config` is its settings tab (dsh ≥ 0.1.7 projects a
+plugin's Config schema into Settings → Plugins; every field below applies on
+save, without a profile reload). Stored as the plugin entry's `config:` in the
+profile patch; a pre-0.1.7 `settings.yaml` section is imported once on first
+launch. All fields optional, defaults shown. A blank consolidation route is
+refused on save; a duplicate one is dropped at runtime with a warning:
 
 ```yaml
 hypatia-auto-memory:
@@ -361,19 +364,24 @@ The cordis config block on the bundle row only carries skill packaging:
     skillsDir: /abs/path         # override the packaged skills/ directory
 ```
 
-`enabled` and `autoApprove` are read when the plugin starts, so changing either
-needs a profile reload; every other switch applies immediately.
+`enabled`, `shelf` and `autoApprove` are read when the collector starts, so
+saving a change to any of them restarts the collector (queue drained, state
+re-opened); every other switch applies in place. The same restart is what
+applies an imported pre-0.1.7 `settings.yaml`: dsh imports it only after every
+plugin has started, and the collector itself waits for that point before it
+starts, so it rarely runs on the defaults at all.
 
 ### Choosing the shelf
 
 `shelf` names the hypatia shelf every entry is written to and every lookup
 reads — logging, consolidation, the cascade, the rules/taboos preload, and the
 startup housekeeping. The settings card offers it as a dropdown of what
-`hypatia list` reports (refreshed about once a minute, and after every settings
-change), marking shelves that are registered but not connected.
+`hypatia list` reports — read on demand when the tab opens; a successful
+listing is cached for 60 s on the Host, a failed one never is — marking
+shelves that are registered but not connected.
 
-- **Takes effect after a profile reload**, like `enabled`. A running queue keeps
-  writing where it started; the log says so when the setting changes.
+- **Takes effect on save**, like `enabled`: the collector restarts on the new
+  shelf, and the log says so.
 - **Progress is kept per shelf.** Watermarks and queued tasks are stored per
   shelf, so a newly chosen shelf starts every session from zero, and switching
   back resumes exactly where that shelf left off — nothing is re-logged or
@@ -393,9 +401,12 @@ change), marking shelves that are registered but not connected.
   (`hypatia connect <dir> --name <name>`). Over MCP, that failure restarts the
   server, so the retry after a `connect` reaches the shelf.
 
-The listing reaches the browser as a second, read-only settings namespace,
-`hypatia-auto-memory-shelves`, which the Host re-registers whenever the listing
-changes. No card claims it, so it renders nowhere; nothing ever writes to it.
+The listing reaches the browser over the same route family as the Memory tab —
+`GET /api/dsh-hypatia-auto-memory/shelves`, mounted before the startup
+reconcile and backfill (and even while `enabled: false`), so the list is there
+when a broken shelf needs replacing. (It rode a read-only settings namespace until dsh 0.1.7 removed that
+Host-side API; a shelf listing is not configuration, and the settings domain
+now only projects plugin Config forms.)
 
 ## Operations checklist
 
@@ -434,7 +445,7 @@ changes. No card claims it, so it renders nowhere; nothing ever writes to it.
 
 | Symptom | Cause / handling |
 |---|---|
-| No entries after chatting | `enabled: false`, missing `hypatia` binary, or the collect fiber PENDING (needs `sessions`, `storageDomain`, `subprocess`, `settings` from the base composition) — check profile logs |
+| No entries after chatting | `enabled: false`, missing `hypatia` binary, or the collect fiber PENDING (needs `sessions`, `storageDomain`, `subprocess` from the base composition) — check profile logs |
 | Nothing logged for a whole run after a restart | The storage domain refused to open because a stored record failed its schema. The storage service validates on read, not on write, so a bad write only surfaces at the next startup — and one bad row fails the whole domain. Look for `startup failed` / `does not match its schema` in the profile log. Task rows missing `error` are now defaulted; for any other bad row, stop DSH, remove it from `~/.dsh/storages/hypatia_auto_memory.json`, and restart |
 | Memory tab never shows data, or shows a read failure | The page is not reached over a **loopback origin**. The route authenticates itself — loopback socket, loopback `Host`, same-origin — so reading DSH from another device (a LAN address, or a `0.0.0.0` binding) is refused by design, and so is a tunnel presenting a public `Host`. Both halves of the payload are refused together, so the tab reports a load failure rather than partial data. Open the GUI at `127.0.0.1` or `localhost` |
 | Entries appear only after a turn finishes | By design: spans are cut at `turn/end`, or at the first `step/end` once a turn has run longer than `flushWindowMs`, so an entry never lacks its own tool results |
@@ -447,10 +458,10 @@ changes. No card claims it, so it renders nowhere; nothing ever writes to it.
 | Watermark says logged, but the shelf has no entries | The shelf was reset or switched after logging. Handled at startup: `housekeeping.reconcileOnStartup` resets any row whose session has no `msg-*` left, and that session is re-logged — and re-consolidated — from the start on its next activity. A shelf query that fails leaves the row untouched. A session whose messages were all deleted on purpose is indistinguishable and is logged again; turn the switch off if that matters |
 | Warning `hypatia mcp unavailable: …; using the hypatia CLI until the profile reloads` | The binary predates `hypatia mcp` (the message quotes its `unrecognized subcommand`), lacks a tool the plugin calls, or answered the handshake with an error. Everything keeps working over the CLI; upgrade hypatia and reload the profile to use MCP |
 | Every call fails with `hypatia mcp exited …` or `timed out` | The binary starts but its MCP server does not come up — a wrapper script in `binaries` that changes clap's exit code or wording is not recognised as an old binary. Set `transport: cli` |
-| Every write fails right after changing `shelf` | The shelf is not registered or not connected — startup logs `shelf "<name>" is not registered`. Connect it (`hypatia connect <dir> --name <name>`) and reload the profile, or pick another |
+| Every write fails right after changing `shelf` | The shelf is not registered or not connected — startup logs `shelf "<name>" is not registered`. Connect it (`hypatia connect <dir> --name <name>`) and save the setting again (or reload the profile), or pick another |
 | The agent searches `default` while the plugin writes elsewhere | A disk copy of `hypatia-memory` (see below) replaced the bundled skill, or recall is disabled, so nothing told the agent which shelf to use |
 | Duplicate `msg-*` after weird manual edits | Delete the entry in hypatia and lower `lastLoggedSeq` for that session in the state domain — backfill recreates it once |
-| The agent's own `hypatia` write still asks for approval | `autoApprove: false` (needs a profile reload to change), the command pipes/redirects/chains outside quotes, or its first word is not one of `binaries` — only plain calls are answered, by design. Reads never reach approval at all, so nothing to fix there |
+| The agent's own `hypatia` write still asks for approval | `autoApprove: false`, the command pipes/redirects/chains outside quotes, or its first word is not one of `binaries` — only plain calls are answered, by design. Reads never reach approval at all, so nothing to fix there |
 | The agent got a memory protocol that tells it to log messages by hand | Another plugin registered `hypatia-memory` first (`dsh-hypatia` still in the profile), or a `hypatia-memory` exists on disk — typically `~/.agents/skills/hypatia-memory`, written by `hypatia skill install --agent codex`. Agent presets load disk skills in a layer nearer than plugins, so it wins in sessions even though the skill center may list this plugin. Remove the copy the startup warning names |
 | Can't tell which model actually ran | By design the choice rotates: one process-local cursor is shared by span summaries, adjudication and cascade, so consecutive calls alternate through `consolidation.models`. Each attempt lands in `~/.dsh/storages/hypatia_auto_memory_diag.json` (`model_calls`) with purpose, provider/model, outcome and duration. The usage ledger cannot answer this — it folds agent turns (`assistant/message`) and never sees a plugin's direct `llm.stream`. A `pending` row means the call is still in flight, or the process died mid-call: the row is written before the call and settled after it |
 | Startup warnings never appear in the terminal | `dsh web` mounts no log exporter, so plugin log lines of any level go nowhere; the console exporter's default threshold would also drop warnings (warn is level 2, above info's 1). Mount a logger such as `dsh-logbook` or `dsh-boot-doctor` temporarily to read them |
@@ -522,9 +533,9 @@ Deliberate, and worth knowing before you rely on them:
     the triples it actually reviews reach that limit.
 
   Its `evals/evals.json` gains cases 9 and 10 for these two patches.
-- **`enabled: false` at the top level is read at plugin startup**; toggling it
-  live requires a profile reload, while the per-feature switches apply
-  immediately.
+- **`enabled: false` at the top level is read when the collector starts**;
+  saving a change restarts the collector, while the per-feature switches apply
+  in place.
 
 ## Directory structure
 
@@ -537,8 +548,8 @@ dsh-hypatia-auto-memory/
 ├── tsdown.config.ts      # browser CJS factory build
 ├── src/
 │   ├── index.js          # fiber composition (collect + optional children)
-│   ├── config.js         # settings namespace, defaults, live updates
-│   ├── shelf.js          # per-shelf table views, `hypatia list`, shelf inventory
+│   ├── config.js         # cordis Config schema (volatile), defaults, live updates
+│   ├── shelf.js          # per-shelf table views, `hypatia list` parsing
 │   ├── state.js          # storageDomain spec + progress helpers
 │   ├── collector.js      # session/event filtering, ledger, backfill
 │   ├── content-policy.js # redaction, dates, caps, slugs (pure)
@@ -551,7 +562,7 @@ dsh-hypatia-auto-memory/
 │   ├── cascade.js        # log₁₆(n) hierarchical summary archive
 │   ├── model-log.js      # bounded record of which model each attempt ran on
 │   ├── memory-status.js  # per-session fold of the two state tables (pure)
-│   ├── memory-api.js     # the Memory tab: read-only route family + JSE reads
+│   ├── memory-api.js     # Memory tab + shelf listing: read-only route family
 │   ├── recall.js         # rules/taboos preload at session start
 │   ├── auto-approve.js   # approves the agent's own plain bash hypatia calls
 │   ├── skills.js         # bundled skill registration (never shadows another provider)

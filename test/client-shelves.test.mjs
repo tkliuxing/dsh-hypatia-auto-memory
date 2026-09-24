@@ -1,44 +1,12 @@
 /**
- * The settings card's shelf dropdown: reading the Host's listing out of a
- * settings descriptor, and keeping the current choice selectable when the
- * listing no longer carries it.
+ * The settings card's shelf dropdown: keeping the current choice selectable
+ * when the Host's listing no longer carries it. Reading the listing itself is
+ * covered by the memory-client tests (the `/shelves` route answer).
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { INVENTORY_NAMESPACE, readShelfInventory, shelfChoices } from '../src/client/shelves.ts'
-
-test('readShelfInventory picks the inventory namespace out of a descriptor', () => {
-  const described = [
-    { ns: 'hypatia-auto-memory', value: { shelf: 'default' } },
-    {
-      ns: INVENTORY_NAMESPACE,
-      // A user-layer override the resolved value would carry; ignored.
-      value: { shelves: [], error: '', listedAt: 0 },
-      base: {
-        shelves: [
-          { name: 'default', path: '/a', connected: true },
-          { name: 'work', path: '/b', connected: false },
-          { path: '/nameless' },
-        ],
-        error: '',
-        listedAt: 1,
-      },
-    },
-  ]
-  assert.deepEqual(readShelfInventory(described), {
-    shelves: [
-      { name: 'default', path: '/a', connected: true },
-      { name: 'work', path: '/b', connected: false },
-    ],
-    error: '',
-  })
-})
-
-test('readShelfInventory reports a Host that publishes no listing', () => {
-  assert.equal(readShelfInventory([{ ns: 'hypatia-auto-memory', value: {} }]), undefined)
-  assert.equal(readShelfInventory([{ ns: INVENTORY_NAMESPACE, value: { shelves: [] } }]), undefined)
-})
+import { shelfChoices } from '../src/client/shelves.ts'
 
 test('shelfChoices keeps a stored shelf the listing no longer reports', () => {
   const listed = [{ name: 'default', path: '/a', connected: true }]

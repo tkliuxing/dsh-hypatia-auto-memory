@@ -3,9 +3,10 @@
 #   dsh plugin --profile <name> add dsh-hypatia-auto-memory          (registry)
 #   dsh plugin --profile <name> add link:/path/to/dsh-hypatia-auto-memory
 #
-# Behavior is configured through the `hypatia-auto-memory` settings namespace
-# (settings.yaml / Web settings), NOT through this config block. The only
-# cordis-level knobs are the bundled skill:
+# Behavior is configured through this entry's `config:` (edited live in
+# Settings → Plugins; dsh ≥ 0.1.7 projects the plugin's Config schema there).
+# The cordis-level knobs below are the non-volatile ones — changing them
+# remounts the plugin:
 #
 #   - id: hypatia-auto-memory
 #     config:

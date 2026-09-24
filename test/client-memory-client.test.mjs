@@ -12,6 +12,7 @@ import {
   memoryUrl,
   mergeMemory,
   parseMemoryPayload,
+  parseShelfInventory,
 } from '../src/client/memory-client.ts'
 
 const SESSION = 'session-83f81e10-4e4b-4eaa-8ff1-9af30e5e1caa'
@@ -220,4 +221,29 @@ test('the gap between the two watermarks is what is left to summarise', () => {
   assert.equal(consolidationGap({ ...withGap, consolidatedSeq: 1778 }), 0)
   // A run may cover a range logging has not reached yet; that is not a backlog.
   assert.equal(consolidationGap({ ...withGap, loggedSeq: 100, consolidatedSeq: 300 }), 0)
+})
+
+test('parseShelfInventory reads the /shelves answer, defensively', () => {
+  assert.deepEqual(parseShelfInventory({
+    shelves: [
+      { name: 'default', path: '/a', connected: true },
+      { name: 'work', connected: 1 },
+      { path: '/nameless' },
+      'junk',
+    ],
+    error: '',
+    listedAt: 42,
+  }), {
+    shelves: [
+      { name: 'default', path: '/a', connected: true },
+      { name: 'work', path: '', connected: false },
+    ],
+    error: '',
+  })
+  assert.deepEqual(parseShelfInventory({ shelves: [], error: 'hypatia exited 1' }), {
+    shelves: [],
+    error: 'hypatia exited 1',
+  })
+  assert.equal(parseShelfInventory(undefined), undefined)
+  assert.equal(parseShelfInventory(['not', 'an', 'object']), undefined)
 })

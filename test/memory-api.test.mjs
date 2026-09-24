@@ -469,3 +469,98 @@ test('the caps are the ones the route documents', async () => {
   assert.equal(MAX_SUMMARIES, 40)
   assert.ok(CONTENT_BUDGET_CHARS > BODY_MAX_CHARS)
 })
+
+/* ---------------------------------------------------------------- shelves -- */
+
+test('the shelves route serves the listing and caches it for the TTL', async () => {
+  let calls = 0
+  let clock = 1000
+  const cli = {
+    query: async () => [],
+    listShelves: async () => {
+      calls += 1
+      return [{ name: 'default', path: '/a', connected: true }]
+    },
+  }
+  const api = createMemoryApi({ cli, read: makeRead(), status: makeStatus(), now: () => clock })
+  const url = `${MEMORY_API_PREFIX}/shelves`
+  const trusted = { origin: 'http://127.0.0.1:3080' }
+
+  const first = await call(api, { url, ...trusted })
+  assert.equal(first.status, 200)
+  assert.deepEqual(first.body.shelves, [{ name: 'default', path: '/a', connected: true }])
+  assert.equal(first.body.error, '')
+  assert.equal(first.body.listedAt, 1000)
+
+  clock += 1000
+  await call(api, { url, ...trusted })
+  assert.equal(calls, 1, 'within the TTL the CLI is not asked again')
+  clock += 61_000
+  await call(api, { url, ...trusted })
+  assert.equal(calls, 2)
+})
+
+test('a failed listing keeps the last good shelves and says why', async () => {
+  let fail = false
+  const status = makeStatus()
+  const cli = {
+    query: async () => [],
+    listShelves: async () => {
+      if (fail) throw new Error('hypatia exited 1')
+      return [{ name: 'default', path: '/a', connected: true }]
+    },
+  }
+  const api = createMemoryApi({ cli, read: makeRead(), status, shelvesTtlMs: 0 })
+  const url = `${MEMORY_API_PREFIX}/shelves`
+  const trusted = { origin: 'http://127.0.0.1:3080' }
+
+  await call(api, { url, ...trusted })
+  fail = true
+  const second = await call(api, { url, ...trusted })
+  assert.equal(second.status, 200, 'a listing failure is data, not an HTTP error')
+  assert.deepEqual(second.body.shelves.map((s) => s.name), ['default'])
+  assert.equal(second.body.error, 'hypatia exited 1')
+  assert.equal(status.lines.filter(([level]) => level === 'warn').length, 1)
+})
+
+test('a failed listing is not cached, and concurrent requests share one run', async () => {
+  let calls = 0
+  let fail = true
+  let release
+  const cli = {
+    query: async () => [],
+    listShelves: async () => {
+      calls += 1
+      await new Promise((resolve) => { release = resolve })
+      if (fail) throw new Error('hypatia exited 1')
+      return [{ name: 'default', path: '/a', connected: true }]
+    },
+  }
+  const api = createMemoryApi({ cli, read: makeRead(), status: makeStatus() })
+  const both = Promise.all([api.fetchShelves(), api.fetchShelves()])
+  await new Promise((resolve) => setImmediate(resolve))
+  release()
+  const [a, b] = await both
+  assert.equal(calls, 1, 'one hypatia list for two concurrent opens')
+  assert.equal(a, b)
+  assert.equal(a.error, 'hypatia exited 1')
+
+  fail = false
+  const retry = api.fetchShelves()
+  await new Promise((resolve) => setImmediate(resolve))
+  release()
+  assert.deepEqual((await retry).shelves.map((s) => s.name), ['default'])
+  assert.equal(calls, 2, 'the failure was not served from cache')
+})
+
+test('the shelves route never serves a cross-site request', async () => {
+  let calls = 0
+  const cli = {
+    query: async () => [],
+    listShelves: async () => { calls += 1; return [] },
+  }
+  const api = createMemoryApi({ cli, read: makeRead(), status: makeStatus() })
+  const res = await call(api, { url: `${MEMORY_API_PREFIX}/shelves`, origin: 'https://evil.example', site: 'cross-site' })
+  assert.equal(res.status, 403)
+  assert.equal(calls, 0)
+})

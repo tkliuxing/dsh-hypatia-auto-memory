@@ -222,10 +222,9 @@ agent/session-start ──▶ rules/taboos inject()
   通道。**session projection** 形态最
   合适，但驱动它的事件在本仓库之外写不出来：`Session.append` 没有任何途径设置信封的
   `ignorable` 标记，而持久化读取路径会拒绝一个带着未知事件类型、又没有该标记的会话
-  日志——所以自定义事件会破坏会话重载。**设置命名空间**能安全写入，但它是根作用域的：
-  宿主无法知道浏览器正在看哪个会话，只能把每个会话的数据都发出去；而且发布意味着销毁
-  并重建持有它的 fiber，因为 `settings.register` 拒绝重名命名空间，也没有任何途径更新
-  已注册的 `base`。
+  日志——所以自定义事件会破坏会话重载。**设置命名空间**即便在还存在时也是根作用域的：
+  宿主无法知道浏览器正在看哪个会话，只能把每个会话的数据都发出去。（dsh 0.1.7 已整体移除
+  宿主侧的设置注册 API，下面的路由族现在是唯一通道。）
 
   这条路由不属于组合应用自己那批已鉴权的路由——插件注册的路由从来都不是——所以它像
   `dsh-hypatia-ui` 那样自鉴权：socket 必须是回环，`Host` 必须是回环名（`localhost`、
@@ -236,8 +235,11 @@ agent/session-start ──▶ rules/taboos inject()
 
 ## 配置
 
-设置命名空间 `hypatia-auto-memory`（编辑 `settings.yaml` 或 Web 设置；所有字段可选，
-展示的是默认值）：
+插件的 cordis `Config` 就是它的设置页（dsh ≥ 0.1.7 把插件的 Config schema 投影到
+「设置 → 插件」；下面每个字段保存即生效，无需重载 profile）。配置以插件条目 `config:`
+的形式存进 profile patch；0.1.7 之前的 `settings.yaml` 段落会在首次启动时被一次性导入。
+所有字段可选，展示的是默认值。空白的巩固路由在保存时就被拒绝；重复的路由在运行时被丢弃
+并记一条警告：
 
 ```yaml
 hypatia-auto-memory:
@@ -292,17 +294,19 @@ bundle 行上的 cordis config 块只承载技能打包：
     skillsDir: /abs/path         # 覆盖打包的 skills/ 目录
 ```
 
-`enabled` 和 `autoApprove` 在插件启动时读取，改动二者需要重载 profile；其它开关
-立即生效。
+`enabled`、`shelf` 和 `autoApprove` 在采集器启动时读取，所以保存其中任一项的改动都会
+重启采集器（排空队列、重新打开状态）；其它开关原地生效。0.1.7 之前的 `settings.yaml`
+也是靠这次重启生效的：dsh 在所有插件启动之后才导入它，而采集器本身会等到那一刻才启动，
+所以基本不会先按默认值跑起来。
 
 ### 选择 shelf
 
 `shelf` 指定所有条目写入、所有查找读取的 hypatia shelf——记录、巩固、级联、
 rules/taboos 预载、启动清理。设置卡片把它做成 `hypatia list` 所报告内容的下拉框
-（约每分钟刷新一次，每次设置变更后也刷新），并标注已注册但未连接的 shelf。
+——标签页打开时按需读取；成功的结果在宿主侧缓存 60 秒，失败的结果从不缓存——并标注
+已注册但未连接的 shelf。
 
-- **像 `enabled` 一样，profile 重载后才生效。** 运行中的队列会继续写到它开始的地方；
-  设置变更时日志会说明。
+- **像 `enabled` 一样，保存即生效**：采集器会在新 shelf 上重启，日志会说明。
 - **进度按 shelf 保存。** 水位和排队的任务按 shelf 存储，所以新选的 shelf 会让每个
   会话从零开始，而切回去会恰好从该 shelf 上次停下的地方继续——不会把已有的内容重新
   记录或重新巩固进某个 shelf。代价落在新 shelf 上：每个活会话从它的开头开始记录——
@@ -316,8 +320,10 @@ rules/taboos 预载、启动清理。设置卡片把它做成 `hypatia list` 所
   重试，直到它被连接（`hypatia connect <dir> --name <name>`）。走 MCP 时，该失败会
   重启 server，所以 `connect` 之后的重试能到达那个 shelf。
 
-列表以第二个只读设置命名空间 `hypatia-auto-memory-shelves` 到达浏览器，宿主在列表
-变化时重新注册它。没有卡片认领它，所以它不渲染在任何地方；也从不写入它。
+列表通过与 Memory 标签页相同的路由族到达浏览器——`GET /api/dsh-hypatia-auto-memory/shelves`，
+在启动时的对账与回填之前就挂载（`enabled: false` 时也挂载），所以 shelf 坏掉、需要换一个
+时列表就在那里。（0.1.7 之前它走一个只读设置命名空间，该宿主侧 API 已被移除；
+shelf 清单本来就不是配置，而设置域现在只投影插件的 Config 表单。）
 
 ## 运维清单
 
@@ -350,7 +356,7 @@ rules/taboos 预载、启动清理。设置卡片把它做成 `hypatia list` 所
 
 | 症状 | 原因 / 处理 |
 |---|---|
-| 聊完没有条目 | `enabled: false`、缺少 `hypatia` 二进制、或 collect fiber 处于 PENDING（需要基础组合里的 `sessions`、`storageDomain`、`subprocess`、`settings`）——查 profile 日志 |
+| 聊完没有条目 | `enabled: false`、缺少 `hypatia` 二进制、或 collect fiber 处于 PENDING（需要基础组合里的 `sessions`、`storageDomain`、`subprocess`）——查 profile 日志 |
 | 重启后一整轮什么都没记录 | storage domain 因为某条已存记录不符合 schema 而拒绝打开。storage service 在读时校验、不在写时校验，所以一次坏写入只会在下次启动时暴露——而一条坏记录会拖垮整个 domain。在 profile 日志里找 `startup failed` / `does not match its schema`。缺 `error` 的任务行现在已默认化；其它坏行则停 DSH、从 `~/.dsh/storages/hypatia_auto_memory.json` 删除它再重启 |
 | 「记忆」标签页始终读不到数据，或显示读取失败 | 页面不是通过**回环来源**访问的。该路由自鉴权——回环 socket、回环 `Host`、同源——所以从另一台设备读 DSH（LAN 地址，或绑定 `0.0.0.0`）会被按设计拒绝，隧道送来公网 `Host` 也一样。响应两半一起被拒，所以标签页报的是读取失败而不是部分数据。请用 `127.0.0.1` 或 `localhost` 打开 GUI |
 | 条目只在 turn 结束后才出现 | 设计如此：span 在 `turn/end` 切分，或当 turn 跑得比 `flushWindowMs` 久时在第一个 `step/end` 切分，所以条目不会缺它自己的工具结果 |
@@ -363,10 +369,10 @@ rules/taboos 预载、启动清理。设置卡片把它做成 `hypatia list` 所
 | 水位说已记录，但 shelf 里没条目 | shelf 在记录后被重置或切换。启动时处理：`housekeeping.reconcileOnStartup` 重置任何 session 已无 `msg-*` 的行，该会话下次活跃时从头重新记录——并重新巩固。shelf 查询失败则不动该行。一个所有消息都被故意删除的会话无法区分，会被重新记录；如果这要紧，关掉这个开关 |
 | 警告 `hypatia mcp unavailable: …; using the hypatia CLI until the profile reloads` | 二进制早于 `hypatia mcp`（消息会引用它的 `unrecognized subcommand`）、缺本插件调用的某工具、或握手返回错误。一切继续走 CLI；升级 hypatia 并重载 profile 以使用 MCP |
 | 每次调用都失败 `hypatia mcp exited …` 或 `timed out` | 二进制能启动但它的 MCP server 起不来——`binaries` 里一个改了 clap 退出码或措辞的包装脚本不会被识别为旧二进制。设 `transport: cli` |
-| 改了 `shelf` 之后每次写入都失败 | shelf 没注册或没连接——启动时记录 `shelf "<name>" is not registered`。连接它（`hypatia connect <dir> --name <name>`）并重载 profile，或换一个 |
+| 改了 `shelf` 之后每次写入都失败 | shelf 没注册或没连接——启动时记录 `shelf "<name>" is not registered`。连接它（`hypatia connect <dir> --name <name>`）后重新保存设置（或重载 profile），或换一个 |
 | Agent 在 `default` 里搜，而插件写在别处 | 一份磁盘上的 `hypatia-memory`（见下）替换了随包技能，或 recall 被禁用，所以没有东西告诉 Agent 用哪个 shelf |
 | 手动乱改后出现重复 `msg-*` | 在 hypatia 里删掉该条目，并在 state domain 里把该会话的 `lastLoggedSeq` 调低——回填会重新创建它一次 |
-| Agent 自己的 `hypatia` 写入仍要审批 | `autoApprove: false`（改动需重载 profile）、命令在引号外有管道/重定向/串联、或首词不是 `binaries` 之一——按设计只回答纯调用。读取根本不会走到审批，所以那里没有要修的 |
+| Agent 自己的 `hypatia` 写入仍要审批 | `autoApprove: false`、命令在引号外有管道/重定向/串联、或首词不是 `binaries` 之一——按设计只回答纯调用。读取根本不会走到审批，所以那里没有要修的 |
 | Agent 拿到了一份教它手动记录消息的记忆协议 | 另一个插件先注册了 `hypatia-memory`（profile 里还有 `dsh-hypatia`），或磁盘上有 `hypatia-memory`——通常是 `hypatia skill install --agent codex` 写的 `~/.agents/skills/hypatia-memory`。Agent 预设会在比插件更近的一层加载磁盘技能，所以它在会话里胜出，尽管技能中心可能列出本插件。删掉启动告警指出的那份拷贝 |
 | 不知道实际用了哪个模型 | 设计上就是轮流的：span 摘要、裁决、cascade 共用一个进程内游标，所以相邻调用在 `consolidation.models` 里交替。每次尝试都落在 `~/.dsh/storages/hypatia_auto_memory_diag.json`（`model_calls`），带 purpose、provider/model、outcome 和耗时。usage ledger 答不了这个问题——它只折算 Agent 的 turn（`assistant/message`），看不见插件直连的 `llm.stream`。`pending` 行表示调用仍在进行中，或进程在调用中途死了：记录在调用前先落盘、调用结束后回填 |
 | 启动告警从不出现在终端 | `dsh web` 不挂日志导出器，所以插件任何级别的日志行都没地方去；控制台导出器的默认阈值也会丢掉警告（warn 是 2 级，高于 info 的 1 级）。临时挂一个 logger，如 `dsh-logbook` 或 `dsh-boot-doctor` 来读它们 |
@@ -417,8 +423,8 @@ rules/taboos 预载、启动清理。设置卡片把它做成 `hypatia list` 所
     行上限里，它们会让技能在真正审阅的三元组远未达到上限前就停在截断检查上。
 
   它的 `evals/evals.json` 为这两处补丁新增 case 9 和 10。
-- **顶层的 `enabled: false` 在插件启动时读取**；实时切换需要重载 profile，而各特性
-  开关立即生效。
+- **顶层的 `enabled: false` 在采集器启动时读取**；保存改动会重启采集器，而各特性
+  开关原地生效。
 
 ## 目录结构
 
@@ -431,8 +437,8 @@ dsh-hypatia-auto-memory/
 ├── tsdown.config.ts      # 浏览器 CJS 工厂构建
 ├── src/
 │   ├── index.js          # fiber 组合（collect + 可选子模块）
-│   ├── config.js         # 设置命名空间、默认值、热更新
-│   ├── shelf.js          # 每 shelf 表视图、`hypatia list`、shelf 清单
+│   ├── config.js         # cordis Config schema（volatile）、默认值、热更新
+│   ├── shelf.js          # 每 shelf 表视图、`hypatia list` 解析
 │   ├── state.js          # storageDomain 规格 + 进度助手
 │   ├── collector.js      # session/event 过滤、台账、回填
 │   ├── content-policy.js # 脱敏、日期、上限、slug（纯函数）
@@ -445,7 +451,7 @@ dsh-hypatia-auto-memory/
 │   ├── cascade.js        # log₁₆(n) 分层摘要归档
 │   ├── model-log.js      # 每次尝试实际用了哪个模型的有界记录
 │   ├── memory-status.js  # 两张状态表按会话折叠（纯函数）
-│   ├── memory-api.js     # 记忆标签页：只读路由族 + JSE 读取
+│   ├── memory-api.js     # 记忆标签页与 shelf 清单：只读路由族 + JSE 读取
 │   ├── recall.js         # 会话启动时的 rules/taboos 预载
 │   ├── auto-approve.js   # 批准 Agent 自己的纯 bash hypatia 调用
 │   ├── skills.js         # 随包技能注册（从不遮蔽其它提供者）
@@ -455,7 +461,7 @@ dsh-hypatia-auto-memory/
 │       ├── SettingsCard.tsx
 │       ├── MemoryView.tsx     # 记忆标签页主体
 │       ├── memory-client.ts   # 它的请求与合并规则（纯函数）
-│       ├── shelves.ts    # 来自清单命名空间的 shelf 下拉选项
+│       ├── shelves.ts    # shelf 下拉选项（清单来自 /shelves 路由）
 │       └── slot-contract.ts
 ├── lib/
 │   └── client.js         # 构建好的浏览器工厂（提交此文件）

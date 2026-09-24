@@ -1,10 +1,10 @@
 /**
- * Type-only slot contract: this plugin contributes one card under
- * `settings.plugin.item`, keyed by its settings namespace.
+ * Type-only slot contract: this plugin contributes one tab inside
+ * `settings.plugins.tab`, keyed by its settings namespace.
  *
- * The slot itself is declared by `@deepseek-ai/dsh-client-ui-settings-plugins`;
- * we only need the type merges so TypeScript knows what `ctx.slots.register`
- * expects here and what locale namespace the card consumes.
+ * The slot itself is declared by `@deepseek-ai/dsh-client-ui-settings`
+ * (the settings domain base, which also provides `ctx.configForms`); we only
+ * need the locale namespace merge so TypeScript knows what the card consumes.
  */
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type { AutoMemoryLocaleKey } from './locales'

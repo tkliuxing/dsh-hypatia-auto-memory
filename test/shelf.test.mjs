@@ -7,12 +7,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { DEFAULT_SHELF, parseShelfList, publishShelfInventory, shelfTable } from '../src/shelf.js'
+import { DEFAULT_SHELF, parseShelfList, shelfTable } from '../src/shelf.js'
 import { advanceProgress } from '../src/progress.js'
 import { createQueue } from '../src/queue.js'
 import { createHypatiaCli } from '../src/hypatia-cli.js'
 import { createRecall } from '../src/recall.js'
-import { DEFAULTS, INVENTORY_NAMESPACE, InventorySchema, SettingsSchema, installConfig } from '../src/config.js'
+import { Config, DEFAULTS, STARTUP_FIELDS, installConfig, sanitizeConfig, snapshotConfig } from '../src/config.js'
+import { apply } from '../src/index.js'
 
 /** Map-backed storageDomain table double. */
 function makeTable(seed = {}) {
@@ -139,138 +140,141 @@ test('parseShelfList reads names, paths with spaces, and connection state', () =
   assert.deepEqual(parseShelfList('No shelves registered.\n'), [])
 })
 
-/* ------------------------------------------------------------- inventory -- */
+/* ---------------------------------------------------------- live config -- */
 
-function makeInventoryCtx() {
-  const registered = []
-  const disposed = []
-  const effects = []
-  const ctx = {
-    plugin({ apply }) {
-      const entry = { base: undefined }
-      apply({
-        settings: {
-          register(ns, schema, options) {
-            entry.ns = ns
-            entry.base = options.base
-          },
-        },
-      })
-      registered.push(entry)
-      return { dispose: async () => { disposed.push(entry) } }
-    },
-    effect(fn) {
-      effects.push(fn())
-    },
-  }
-  return { ctx, registered, disposed, stop: () => effects.forEach((dispose) => dispose()) }
+/** A volatile reference double implementing the shared cosmokit protocol. */
+function volatileOf(initial) {
+  let current = initial
+  return Object.freeze({
+    get: () => current,
+    [Symbol.for('cosmokit.volatile.write')]: (value) => { current = value },
+    /** Test-only commit: what the Loader's volatile update would do. */
+    commit: (value) => { current = value },
+  })
 }
 
-test('the inventory republishes only when the listing changes', async () => {
-  const { ctx, registered, disposed, stop } = makeInventoryCtx()
-  let shelves = [{ name: 'default', path: '/a', connected: true }]
-  const cli = { listShelves: async () => shelves }
-  const inventory = publishShelfInventory({
-    ctx, cli, status: makeStatus(), namespace: INVENTORY_NAMESPACE, schema: InventorySchema, label: 't', now: () => 42,
-  })
+function makeConfigCtx() {
+  const listeners = new Map()
+  return {
+    ctx: { on: (event, cb) => listeners.set(event, cb) },
+    emit: (event) => listeners.get(event)?.(),
+  }
+}
 
-  await inventory.refresh()
-  assert.equal(registered.length, 1)
-  assert.equal(registered[0].ns, INVENTORY_NAMESPACE)
-  assert.deepEqual(registered[0].base, { shelves, error: '', listedAt: 42 })
+test('installConfig reads live and fires onChange on loader/volatile-update', () => {
+  const { ctx, emit } = makeConfigCtx()
+  const shelf = volatileOf('default')
+  const handle = installConfig(ctx, { shelf, enabled: volatileOf(true) })
+  assert.equal(handle.get().shelf, 'default')
 
-  await inventory.refresh()
-  assert.equal(registered.length, 1, 'an unchanged listing re-registers nothing')
+  const seen = []
+  handle.onChange((value) => seen.push(value.shelf))
+  assert.deepEqual(seen, [], 'no replay on subscribe')
+  shelf.commit('work')
+  emit('loader/volatile-update')
+  assert.deepEqual(seen, ['work'])
+  assert.equal(handle.get().shelf, 'work')
+})
 
-  shelves = [...shelves, { name: 'work', path: '/b', connected: true }]
-  await inventory.refresh()
-  assert.equal(registered.length, 2)
-  assert.deepEqual(disposed, [registered[0]], 'the old registration is released first')
+test('installConfig hands onChange the same sanitized value get() returns, warning once per commit', () => {
+  const { ctx, emit } = makeConfigCtx()
+  const route = { provider: 'deepseek', model: 'deepseek-chat' }
+  const consolidation = volatileOf({ models: [route, route] })
+  const warnings = []
+  const handle = installConfig(ctx, { consolidation }, (m) => warnings.push(m))
+  assert.deepEqual(handle.get().consolidation.models, [route])
+  assert.equal(handle.get(), handle.get(), 'cached between commits')
+  handle.get()
+  assert.equal(warnings.length, 1, 'reads do not repeat the warning')
+
+  const seen = []
+  handle.onChange((value) => seen.push(value))
+  consolidation.commit({ models: [route, route, route] })
+  emit('loader/volatile-update')
+  assert.deepEqual(seen[0].consolidation.models, [route], 'listeners see the sanitized value')
+  assert.equal(seen[0], handle.get())
+  assert.equal(warnings.length, 2, 'a new commit reports again')
+})
+
+/** An entry-context double for `apply`: records mounted and disposed collectors. */
+function makeEntryCtx() {
+  const listeners = new Map()
+  const effects = []
+  const mounted = []
+  const disposed = []
+  const ctx = {
+    on: (event, cb) => listeners.set(event, cb),
+    effect: (fn) => { effects.push(fn()) },
+    plugin: (options) => {
+      const fiber = { options, dispose: async () => { disposed.push(fiber) } }
+      mounted.push(fiber)
+      return fiber
+    },
+    logger: () => ({ info: () => {}, warn: () => {}, error: () => {} }),
+  }
+  return {
+    ctx, mounted, disposed,
+    emit: (event) => listeners.get(event)?.(),
+    stop: () => effects.forEach((dispose) => dispose?.()),
+  }
+}
+
+const settle = () => new Promise((resolve) => setImmediate(resolve))
+
+test('a change to a startup field restarts the collector; other changes do not', async () => {
+  assert.deepEqual(STARTUP_FIELDS, ['enabled', 'shelf', 'autoApprove'])
+  const { ctx, mounted, disposed, emit, stop } = makeEntryCtx()
+  const config = Config({})
+  apply(ctx, config)
+  await settle()
+  assert.equal(mounted.length, 1, 'mounted once the Loader has settled')
+
+  config.queue[Symbol.for('cosmokit.volatile.write')]({ ...config.queue.get(), concurrency: 2 })
+  emit('loader/volatile-update')
+  await settle()
+  assert.equal(mounted.length, 1, 'a live field applies in place')
+
+  config.shelf[Symbol.for('cosmokit.volatile.write')]('work')
+  emit('loader/volatile-update')
+  await settle()
+  assert.equal(mounted.length, 2)
+  assert.deepEqual(disposed, [mounted[0]], 'the old collector is disposed first')
+
   stop()
+  config.enabled[Symbol.for('cosmokit.volatile.write')](false)
+  emit('loader/volatile-update')
+  await settle()
+  assert.equal(mounted.length, 2, 'nothing is mounted once the entry is gone')
 })
 
-test('a failed listing keeps the last shelves and says why, once', async () => {
-  const { ctx, registered, stop } = makeInventoryCtx()
-  const status = makeStatus()
-  let fail = false
-  const cli = {
-    listShelves: async () => {
-      if (fail) throw new Error('hypatia exited 1')
-      return [{ name: 'default', path: '/a', connected: true }]
-    },
-  }
-  const inventory = publishShelfInventory({
-    ctx, cli, status, namespace: INVENTORY_NAMESPACE, schema: InventorySchema, label: 't',
-  })
-  await inventory.refresh()
-  fail = true
-  const listing = await inventory.refresh()
-  await inventory.refresh()
-  assert.equal(listing.error, 'hypatia exited 1')
-  assert.deepEqual(listing.shelves.map((s) => s.name), ['default'])
-  assert.equal(registered.at(-1).base.error, 'hypatia exited 1')
-  assert.equal(status.lines.filter(([level]) => level === 'warn').length, 1)
-  stop()
+test('the collector waits for the Loader to settle before it mounts', async () => {
+  const { ctx, mounted } = makeEntryCtx()
+  let release
+  ctx.root = { loader: { await: () => new Promise((resolve) => { release = resolve }) } }
+  apply(ctx, Config({}))
+  await settle()
+  assert.equal(mounted.length, 0)
+  release()
+  await settle()
+  assert.equal(mounted.length, 1)
 })
 
-test('a publish that fails is retried by the next poll, and never rejects', async () => {
-  const status = makeStatus()
-  let attempts = 0
-  const ctx = {
-    plugin({ apply }) {
-      attempts += 1
-      if (attempts === 1) throw new Error('INACTIVE_EFFECT')
-      apply({ settings: { register() {} } })
-      return { dispose: async () => {} }
+test('sanitizeConfig drops blank and duplicate consolidation routes and says why', () => {
+  const warnings = []
+  const warn = (m) => warnings.push(m)
+  const value = {
+    consolidation: {
+      models: [
+        { provider: 'deepseek', model: 'deepseek-chat' },
+        { provider: ' ', model: 'x' },
+        { provider: 'deepseek', model: 'deepseek-chat' },
+      ],
     },
-    effect: () => {},
   }
-  const cli = { listShelves: async () => [{ name: 'default', path: '/a', connected: true }] }
-  const inventory = publishShelfInventory({
-    ctx, cli, status, namespace: INVENTORY_NAMESPACE, schema: InventorySchema, label: 't', intervalMs: 1e9,
-  })
-  const first = await inventory.refresh()
-  assert.deepEqual(first.shelves.map((s) => s.name), ['default'], 'resolves with the listing')
-  assert.equal(status.lines.filter(([level]) => level === 'warn').length, 1)
-  await inventory.refresh()
-  assert.equal(attempts, 2, 'the unchanged listing is published again after a failure')
-  await inventory.refresh()
-  assert.equal(attempts, 2, 'and not again once it landed')
-})
-
-test('a registration the settings service refuses is retried too', async () => {
-  let registers = 0
-  const ctx = {
-    plugin({ apply }) {
-      apply({ settings: { register() { registers += 1; if (registers === 1) throw new Error('already registered') } } })
-      return { dispose: async () => {} }
-    },
-    effect: () => {},
-  }
-  const cli = { listShelves: async () => [] }
-  const inventory = publishShelfInventory({
-    ctx, cli, status: makeStatus(), namespace: INVENTORY_NAMESPACE, schema: InventorySchema, label: 't', intervalMs: 1e9,
-  })
-  await inventory.refresh()
-  await inventory.refresh()
-  await inventory.refresh()
-  assert.equal(registers, 2)
-})
-
-test('a registration that keeps failing is logged once, not every poll', async () => {
-  const status = makeStatus()
-  const ctx = {
-    plugin({ apply }) {
-      apply({ settings: { register() { throw new Error('already registered') } } })
-      return { dispose: async () => {} }
-    },
-    effect: () => {},
-  }
-  const inventory = publishShelfInventory({
-    ctx, cli: { listShelves: async () => [] }, status, namespace: INVENTORY_NAMESPACE, schema: InventorySchema, label: 't', intervalMs: 1e9,
-  })
-  for (let i = 0; i < 4; i += 1) await inventory.refresh()
-  assert.equal(status.lines.filter(([level]) => level === 'warn').length, 1)
+  const cleaned = sanitizeConfig(value, warn)
+  assert.deepEqual(cleaned.consolidation.models, [{ provider: 'deepseek', model: 'deepseek-chat' }])
+  assert.equal(warnings.length, 2)
+  assert.equal(sanitizeConfig({ consolidation: { models: [] } }, warn).consolidation.models.length, 0)
 })
 
 /* ------------------------------------------------------------ cli + config -- */
@@ -321,23 +325,36 @@ test('listShelves runs hypatia list', async () => {
   assert.deepEqual(shelves, [{ name: 'default', path: '/a', connected: true }])
 })
 
-test('the shelf setting defaults to default and refuses blank or padded names', () => {
-  assert.equal(SettingsSchema({}).shelf, 'default')
+test('the Config schema fills the documented defaults', () => {
+  const value = snapshotConfig(Config({}))
+  assert.equal(value.shelf, 'default')
+  assert.equal(value.enabled, true)
+  assert.equal(value.transport, 'mcp')
+  assert.deepEqual(value.binaries, ['hypatia'])
+  assert.equal(value.consolidation.cascade.batchSize, 16)
   assert.equal(DEFAULTS.shelf, 'default')
-  let validate
-  installConfig({
-    settings: {
-      installSection(owner, ns, schema, entry, hooks) {
-        validate = hooks.validate
-        hooks.setSource(() => entry)
-      },
-    },
-  })
-  const value = (shelf) => SettingsSchema({ shelf })
-  assert.doesNotThrow(() => validate(value('work')))
-  assert.throws(() => validate(value('')), /shelf/)
-  assert.throws(() => validate(value(' work')), /shelf/)
-  assert.throws(() => validate(value('my shelf')), /shelf/)
+})
+
+test('volatile fields parse to live references; snapshotConfig reads through them', () => {
+  const parsed = Config({ shelf: 'work' })
+  assert.equal(typeof parsed.shelf.get, 'function', 'a volatile field is a reference, not a value')
+  assert.equal(snapshotConfig(parsed).shelf, 'work')
+  // A Loader-style update commits into the same reference.
+  parsed.shelf[Symbol.for('cosmokit.volatile.write')]('other')
+  assert.equal(snapshotConfig(parsed).shelf, 'other')
+})
+
+test('a blank consolidation route is refused at parse time', () => {
+  assert.doesNotThrow(() => Config({ consolidation: { models: [{ provider: 'deepseek', model: 'deepseek-chat' }] } }))
+  assert.throws(() => Config({ consolidation: { models: [{ provider: ' ', model: 'x' }] } }))
+  assert.throws(() => Config({ consolidation: { models: [{ provider: 'deepseek', model: '' }] } }))
+})
+
+test('the shelf setting refuses blank or padded names at parse time', () => {
+  assert.doesNotThrow(() => Config({ shelf: 'work' }))
+  assert.throws(() => Config({ shelf: '' }))
+  assert.throws(() => Config({ shelf: ' work' }))
+  assert.throws(() => Config({ shelf: 'my shelf' }))
 })
 
 /* ---------------------------------------------------------------- recall -- */

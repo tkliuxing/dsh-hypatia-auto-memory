@@ -6,13 +6,13 @@
  * rest, so a deployment missing `llm` still logs conversations and a
  * deployment missing `skills` still remembers:
  *
- *   collect  (inject sessions, storageDomain, subprocess, settings)
+ *   collect  (inject sessions, storageDomain, subprocess)
  *     ├─ consolidate (inject llm, sessions)   — span summaries, cascade, work units
  *     ├─ recall      (inject agents)          — rules/taboos preload at session start
  *     ├─ housekeeping (inject sessionPersistence) — prune progress of vanished sessions
+ *     ├─ memory-api  (inject webServer)       — the Memory tab + shelf listing routes
  *     ├─ auto-approve (inject approval, tools) — the agent's own bash `hypatia` calls
- *     ├─ skills      (inject skills)          — hypatia-memory, hypatia, hypatia-dream
- *     └─ shelf-inventory (inject settings)    — `hypatia list` for the settings card
+ *     └─ skills      (inject skills)          — hypatia-memory, hypatia, hypatia-dream
  *
  * The last two fibers are here because this plugin REPLACES `dsh-hypatia`:
  * writing memory by asking the model to do it did not happen in practice, and
@@ -27,11 +27,12 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { absolutizeDates, blocksToText, eventDate, redactSecrets } from './content-policy.js'
-import { INVENTORY_NAMESPACE, InventorySchema, installConfig } from './config.js'
+import { STARTUP_FIELDS, installConfig } from './config.js'
 import { openState } from './state.js'
 import { EMPTY_PROGRESS, advanceProgress } from './progress.js'
 import { createStatus } from './status.js'
 import { createHypatiaClient } from './hypatia-client.js'
+import { createHypatiaCli } from './hypatia-cli.js'
 import { createWriter } from './writer.js'
 import { TaskDeferredError, createQueue } from './queue.js'
 import { countLoggableMessages, createCollector, formatSpan } from './collector.js'
@@ -45,9 +46,13 @@ import { createPersistedSessions } from './persisted-session.js'
 import { createAutoApprove } from './auto-approve.js'
 import { registerSkills } from './skills.js'
 import { backfillConsolidation, normalizeTaskProjects, pruneVanishedSessions, reconcileProgress } from './housekeeping.js'
-import { publishShelfInventory, shelfTable } from './shelf.js'
+import { shelfTable } from './shelf.js'
 
 export const name = 'dsh-hypatia-auto-memory'
+
+// The Loader projects this schema into the settings tab (volatile fields) and
+// validates every committed edit; see config.js.
+export { Config } from './config.js'
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const DEFAULT_SKILLS_DIR = join(PACKAGE_ROOT, 'skills')
@@ -57,28 +62,110 @@ const DEFAULT_SKILLS_DIR = join(PACKAGE_ROOT, 'skills')
 /* -------------------------------------------------------------------------- */
 
 export function apply(ctx, config = {}) {
-  ctx.plugin({
-    name: `${name}/collect`,
-    inject: ['sessions', 'storageDomain', 'subprocess', 'settings'],
-    apply: (collectCtx) => applyCollect(collectCtx, config),
+  const status = createStatus(ctx, name)
+  // Created on the entry fiber's own context: `loader/volatile-update` is
+  // instance-local, so the handle must subscribe here, not in a child fiber.
+  const configHandle = installConfig(ctx, config, (message) => status.warn(message))
+
+  let stopped = false
+  ctx.effect(() => () => {
+    stopped = true
+  }, `${name}: stop collector restarts`)
+
+  /** The startup-read values the running (or next) collector uses. */
+  const pickStartup = (value) => Object.fromEntries(STARTUP_FIELDS.map((key) => [key, value[key]]))
+  let collect
+  let running
+  const mount = () => {
+    if (stopped) return
+    running = pickStartup(configHandle.get())
+    collect = ctx.plugin({
+      name: `${name}/collect`,
+      inject: ['sessions', 'storageDomain', 'subprocess'],
+      apply: (collectCtx) => applyCollect(collectCtx, configHandle, status),
+    })
+  }
+
+  // Mounted once every profile entry has settled rather than right away: dsh
+  // imports a pre-0.1.7 `settings.yaml` at that point, as a live update, and
+  // starting later narrows the window in which the collector runs on the
+  // defaults before the imported values arrive. Whatever still lands after it
+  // started is handled by the restart below.
+  let chain = Promise.resolve()
+    .then(() => ctx.root?.loader?.await?.())
+    .catch(() => {})
+    .then(mount)
+    .catch((error) => status.error('collector mount failed', error))
+
+  // The collector reads STARTUP_FIELDS once; a committed change to one of them
+  // restarts it, so an edit on the settings tab takes effect on save.
+  configHandle.onChange((value) => {
+    if (running === undefined) return
+    const changed = STARTUP_FIELDS.filter((key) => !Object.is(value[key], running[key]))
+    if (changed.length === 0) return
+    running = pickStartup(value)
+    status.info(`${changed.join(', ')} changed; restarting the collector`)
+    chain = chain.then(async () => {
+      const previous = collect
+      collect = undefined
+      await previous?.dispose()
+      mount()
+    }).catch((error) => status.error('collector restart failed', error))
   })
 }
 
-function applyCollect(ctx, cordisConfig) {
-  const status = createStatus(ctx, name)
+function applyCollect(ctx, configHandle, status) {
   let disposed = false
   ctx.effect(() => () => {
     disposed = true
   }, `${name}: dispose flag`)
 
   void start().catch((error) => {
-    status.error('startup failed; plugin will not collect until the profile reloads', error)
+    status.error('startup failed; plugin will not collect until it restarts (a settings change or a profile reload)', error)
   })
 
+  /**
+   * The Memory tab's read side and the settings card's shelf listing.
+   * Optional: it needs `webServer`, so a headless or TUI composition simply has
+   * no Memory tab and nothing else changes. The route authenticates itself —
+   * see memory-api.js.
+   */
+  function mountMemoryApi({ cli, read, shared }) {
+    ctx.plugin({
+      name: `${name}/memory-api`,
+      inject: ['webServer'],
+      apply: (c) => {
+        const api = createMemoryApi({ cli, read, status })
+        c.effect(() => {
+          const unregister = c.webServer.register(api.route)
+          shared.memoryApi = api
+          return () => {
+            unregister()
+            // Only if this fiber's own API is still the live one: a reload may
+            // have mounted a successor before this disposer runs.
+            if (shared.memoryApi === api) shared.memoryApi = undefined
+          }
+        }, `${name}: memory API route`)
+      },
+    })
+  }
+
   async function start() {
-    const configHandle = installConfig(ctx)
     if (configHandle.get().enabled === false) {
       status.info('disabled via hypatia-auto-memory.enabled=false')
+      // The settings card still offers the shelf listing, so a user can pick
+      // the shelf before turning the plugin back on. No state is opened: the
+      // Memory tab reads as "nothing logged", which is the truth while off.
+      mountMemoryApi({
+        cli: createHypatiaCli(ctx, {
+          get binaries() {
+            return configHandle.get().binaries
+          },
+          shelf: configHandle.get().shelf,
+        }),
+        read: (sessionId) => buildStatus({ progressEntries: [], taskEntries: [], sessionId }),
+        shared: {},
+      })
       return
     }
 
@@ -110,14 +197,6 @@ function applyCollect(ctx, cordisConfig) {
       return
     }
     const modelLog = openedModelLog.modelLog
-    let announcedShelf = shelf
-    configHandle.onChange((value) => {
-      if (value.shelf === announcedShelf) return
-      announcedShelf = value.shelf
-      if (value.shelf !== shelf) {
-        status.info(`shelf changed to "${value.shelf}"; still writing to "${shelf}" until the profile reloads`)
-      }
-    })
 
     const queue = createQueue({
       tasks: state.tasks,
@@ -165,22 +244,16 @@ function applyCollect(ctx, cordisConfig) {
     await normalizeTaskProjects({ tasks: state.tasks, status })
     if (disposed) return
 
-    // What the settings card offers as choices. Also the one place a missing
-    // shelf is noticed before the first write fails on it.
-    const inventory = publishShelfInventory({
-      ctx,
-      cli,
-      status,
-      namespace: INVENTORY_NAMESPACE,
-      schema: InventorySchema,
-      label: name,
-    })
-    configHandle.onChange(() => { void inventory.refresh() })
-    void inventory.refresh().then(({ shelves, error }) => {
-      if (error !== '') return
+    // The one place a missing shelf is noticed before the first write fails on
+    // it. The settings card's dropdown reads the same listing on demand from
+    // the route family's `/shelves` endpoint (see memory-api.js); nothing polls
+    // here anymore.
+    void cli.listShelves().then((shelves) => {
       const found = shelves.find((entry) => entry.name === shelf)
       if (found === undefined) status.warn(`shelf "${shelf}" is not registered with hypatia; every write will fail until it is (hypatia connect <dir> --name ${shelf})`)
       else if (!found.connected) status.warn(`shelf "${shelf}" is registered but not connected; writes will fail until it is`)
+    }, (error) => {
+      status.warn(`shelf listing failed: ${error instanceof Error ? error.message : String(error)}`)
     })
     // Late-bound handles to the optional child fibers. Adjudication needs a
     // model route, which only the consolidate fiber has — without it the writer
@@ -188,6 +261,19 @@ function applyCollect(ctx, cordisConfig) {
     // never a guessed one. The memory API is late-bound for the same reason: it
     // needs `webServer`, and a headless composition has none.
     const shared = { consolidator: undefined, memoryApi: undefined }
+
+    // Mounted before reconcile and backfill, which can take long or fail: the
+    // settings card's shelf listing rides this route family, and a broken
+    // shelf is exactly when the user needs it.
+    mountMemoryApi({
+      cli,
+      read: (sessionId) => buildStatus({
+        progressEntries: state.progress.entries(),
+        taskEntries: state.tasks.entries(),
+        sessionId,
+      }),
+      shared,
+    })
 
     const writer = createWriter(cli, {
       status,
@@ -327,45 +413,21 @@ function applyCollect(ctx, cordisConfig) {
     const pruned = await queue.pruneFailed(['log-message'])
     if (pruned > 0) status.info(`pruned ${pruned} failed log-message task(s); the watermarks re-derive their ranges`)
 
+    // A restart (a startup field changed) may have begun while the passes
+    // above ran; stop before touching the shelf any further.
+    if (disposed) return
+
     // Progress rows whose session left nothing in the shelf (a wiped or replaced
     // shelf) are reset BEFORE backfill, so a live session among them is logged
     // from the start in this very run. See housekeeping.js for why it only acts
     // on positive evidence.
     if (configHandle.get().housekeeping?.reconcileOnStartup !== false) {
       await reconcileProgress({ progress: state.progress, cli, status })
+      if (disposed) return
     }
 
     await collector.backfillLiveSessions()
     status.info('collector running (backfill complete)')
-
-    // The conversation tab's read side. Optional: it needs `webServer`, so a
-    // headless or TUI composition simply has no Memory tab and nothing else
-    // changes. The route authenticates itself — see memory-api.js.
-    ctx.plugin({
-      name: `${name}/memory-api`,
-      inject: ['webServer'],
-      apply: (c) => {
-        const api = createMemoryApi({
-          cli,
-          read: (sessionId) => buildStatus({
-            progressEntries: state.progress.entries(),
-            taskEntries: state.tasks.entries(),
-            sessionId,
-          }),
-          status,
-        })
-        c.effect(() => {
-          const unregister = c.webServer.register(api.route)
-          shared.memoryApi = api
-          return () => {
-            unregister()
-            // Only if this fiber's own API is still the live one: a reload may
-            // have mounted a successor before this disposer runs.
-            if (shared.memoryApi === api) shared.memoryApi = undefined
-          }
-        }, `${name}: memory API route`)
-      },
-    })
 
     // Both passes need `sessionPersistence` for the full listing — live sessions
     // alone would make every unloaded session look gone, and carry the cwd a
@@ -472,12 +534,12 @@ function applyCollect(ctx, cordisConfig) {
       })
     }
 
-    if (cordisConfig.skills !== false) {
+    if (configHandle.get().skills !== false) {
       ctx.plugin({
         name: `${name}/skills`,
         inject: ['skills'],
         apply: (c) => {
-          void registerSkills(c, cordisConfig.skillsDir ?? DEFAULT_SKILLS_DIR, status, PLUGIN_NAME)
+          void registerSkills(c, configHandle.get().skillsDir ?? DEFAULT_SKILLS_DIR, status, PLUGIN_NAME)
             .catch((error) => status.warn(`skill registration failed: ${String(error)}`))
         },
       })

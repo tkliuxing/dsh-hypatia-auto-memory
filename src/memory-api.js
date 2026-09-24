@@ -80,6 +80,14 @@ export const CONTENT_BUDGET_CHARS = 120_000
  */
 export const CONTENT_TTL_MS = 15_000
 
+/**
+ * How long a successful shelf listing is reused before `hypatia list` runs
+ * again. The settings card reads it on open, so this only shields against a
+ * user flipping between tabs repeatedly; a failed listing is never reused. (The pre-0.1.7 settings namespace polled every minute;
+ * on demand with a TTL needs no timer at all.)
+ */
+export const SHELVES_TTL_MS = 60_000
+
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store',
@@ -372,15 +380,16 @@ export function fitBudget(entries, spent = 0) {
  * an in-memory fold over the two tables and costs nothing.
  *
  * @param {{
- *   cli: {query: (jse: string) => Promise<any>},
+ *   cli: {query: (jse: string) => Promise<any>, listShelves: () => Promise<{name: string, path: string, connected: boolean}[]>},
  *   read: (sessionId: string) => {sessions: object[], failed: object[]},
  *   status: import('./status.js').StatusLog,
  *   ttlMs?: number,
+ *   shelvesTtlMs?: number,
  *   now?: () => number,
  * }} deps - `read` folds the state tables for one session (see memory-status.js).
- * @returns {{route: {kind: string, path: string, handler: Function}, invalidate: (sessionId?: string) => void, fetchContent: (sessionId: string, watermark?: number) => Promise<object>}}
+ * @returns {{route: {kind: string, path: string, handler: Function}, invalidate: (sessionId?: string) => void, fetchContent: (sessionId: string, watermark?: number) => Promise<object>, fetchShelves: () => Promise<object>}}
  */
-export function createMemoryApi({ cli, read, status, ttlMs = CONTENT_TTL_MS, now = Date.now }) {
+export function createMemoryApi({ cli, read, status, ttlMs = CONTENT_TTL_MS, shelvesTtlMs = SHELVES_TTL_MS, now = Date.now }) {
   /** @type {Map<string, {at: number, watermark: number | undefined, value: object}>} */
   const cache = new Map()
   /**
@@ -390,6 +399,43 @@ export function createMemoryApi({ cli, read, status, ttlMs = CONTENT_TTL_MS, now
   let generation = 0
   /** @type {Map<string, {signature: string, at: number}>} */
   const changes = new Map()
+  /** @type {{at: number, value: {shelves: object[], error: string, listedAt: number}} | undefined} */
+  let shelvesCache
+  /** @type {Promise<{shelves: object[], error: string, listedAt: number}> | undefined} */
+  let shelvesInFlight
+  /** Last successful listing, kept to answer a failure with. */
+  let lastShelves = []
+
+  /**
+   * The shelf listing for the settings card, from cache while it is fresh.
+   *
+   * Only a successful listing is cached: after a failure the next open asks
+   * again, so fixing hypatia (`hypatia connect …`) shows up at once. A failed
+   * `hypatia list` answers with the last good shelves and says why — the card
+   * must be able to tell "no shelves registered" from "could not ask", and a
+   * transient CLI failure should not empty a dropdown the user is looking at.
+   * Concurrent requests share one `hypatia list`.
+   */
+  function fetchShelves() {
+    if (shelvesCache !== undefined && now() - shelvesCache.at < shelvesTtlMs) return Promise.resolve(shelvesCache.value)
+    shelvesInFlight ??= (async () => {
+      try {
+        const shelves = await cli.listShelves()
+        lastShelves = shelves
+        const value = { shelves, error: '', listedAt: now() }
+        shelvesCache = { at: now(), value }
+        return value
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        status.warn(`shelf listing failed: ${message}`)
+        shelvesCache = undefined
+        return { shelves: lastShelves, error: message, listedAt: now() }
+      } finally {
+        shelvesInFlight = undefined
+      }
+    })()
+    return shelvesInFlight
+  }
 
   async function loadContent(sessionId) {
     const isSummary = summaryMatcher(sessionId)
@@ -542,6 +588,10 @@ export function createMemoryApi({ cli, read, status, ttlMs = CONTENT_TTL_MS, now
       return
     }
     const path = url.pathname.slice(MEMORY_API_PREFIX.length)
+    if (path === '/shelves') {
+      writeJson(res, 200, await fetchShelves())
+      return
+    }
     if (path !== '/session') {
       writeJson(res, 404, { error: 'not found' })
       return
@@ -553,5 +603,6 @@ export function createMemoryApi({ cli, read, status, ttlMs = CONTENT_TTL_MS, now
     route: { kind: 'prefix', path: MEMORY_API_PREFIX, handler },
     invalidate,
     fetchContent,
+    fetchShelves,
   }
 }

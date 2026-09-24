@@ -10,6 +10,8 @@
  * `node:test` like `shelves.ts`.
  */
 
+import type { LoadShelfInventory, ShelfInfo, ShelfInventory } from './shelves'
+
 /** Route prefix the Host claims; the tab appends `/session`. */
 export const MEMORY_API_PREFIX = '/api/dsh-hypatia-auto-memory'
 
@@ -108,6 +110,52 @@ export const fetchMemory: FetchMemory = async (sessionId, { content }) => {
   const payload = parseMemoryPayload(body, sessionId)
   if (payload === undefined) throw new Error('the Host returned an unreadable memory payload')
   return payload
+}
+
+/**
+ * Fetch the shelf listing for the settings card.
+ *
+ * Rides the same self-authenticating route family as the Memory tab — the
+ * settings page passes the same loopback / same-origin checks — because the
+ * 0.1.7 settings domain no longer lets a Host plugin publish a dynamic,
+ * non-config namespace for the card to read.
+ */
+export const fetchShelves: LoadShelfInventory = async () => {
+  const response = await fetch(`${MEMORY_API_PREFIX}/shelves`, {
+    method: 'GET',
+    credentials: 'same-origin',
+    headers: { accept: 'application/json' },
+  })
+  const body: unknown = await response.json().catch(() => undefined)
+  if (!response.ok) {
+    const message = isRecord(body) && typeof body.error === 'string' ? body.error : `HTTP ${String(response.status)}`
+    throw new Error(message)
+  }
+  const inventory = parseShelfInventory(body)
+  if (inventory === undefined) throw new Error('the Host returned an unreadable shelf listing')
+  return inventory
+}
+
+/**
+ * Read the Host's `/shelves` answer into the card's shape, defensively.
+ * @param value - the parsed response body.
+ * @returns the listing, or undefined when the body is not one.
+ */
+export function parseShelfInventory(value: unknown): ShelfInventory | undefined {
+  if (!isRecord(value)) return undefined
+  return {
+    shelves: Array.isArray(value.shelves)
+      ? value.shelves.flatMap((shelf): ShelfInfo[] => {
+          if (!isRecord(shelf) || typeof shelf.name !== 'string' || shelf.name === '') return []
+          return [{
+            name: shelf.name,
+            path: typeof shelf.path === 'string' ? shelf.path : '',
+            connected: shelf.connected === true,
+          }]
+        })
+      : [],
+    error: str(value.error),
+  }
 }
 
 /**

@@ -3,5 +3,8 @@ node_modules
 *.log
 coverage
 
+# 仓库不维护 lockfile，CI 走 npm install（见 .github/workflows/publish.yml）
+package-lock.json
+
 # 从私有 hypatia shelf 抽取的实验数据，可由 extract-*.mjs 重新生成，不入库
 docs/jev-decision-model-research-scripts/*.json

@@ -1,14 +1,13 @@
 /**
  * Shelf choices for the settings card.
  *
- * The Host publishes `hypatia list` as the read-only `hypatia-auto-memory-shelves`
- * settings namespace (see `src/config.js`); the card reads it through the
- * settings descriptor. Zero runtime imports, so it is unit-tested under
- * `node:test` like `card-form.ts`.
+ * The Host serves `hypatia list` from the Memory tab's route family
+ * (`GET /api/dsh-hypatia-auto-memory/shelves`, see `src/memory-api.js`); the
+ * fetch itself lives in `memory-client.ts`. Until dsh 0.1.7 this listing rode
+ * a read-only settings namespace, which the settings overhaul removed.
+ *
+ * Zero runtime imports, so the parsing half is unit-tested under `node:test`.
  */
-
-/** Namespace the Host publishes the shelf listing under. */
-export const INVENTORY_NAMESPACE = 'hypatia-auto-memory-shelves'
 
 /** Shelf hypatia uses when none is named. */
 export const DEFAULT_SHELF = 'default'
@@ -37,37 +36,6 @@ export interface ShelfChoice {
   connected: boolean
   /** False for a stored value the listing no longer reports. */
   listed: boolean
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-/**
- * Pick the inventory namespace out of a settings descriptor.
- *
- * Reads the composition layer (`base`), which only the Host sets, rather than
- * the resolved value: a stray user-layer section for this namespace would
- * otherwise freeze the list.
- * @param described - the `namespaces` array a settings `describe()` returns.
- * @returns the listing, or undefined when the Host does not serve one.
- */
-export function readShelfInventory(described: readonly unknown[]): ShelfInventory | undefined {
-  const view = described.find(entry => isRecord(entry) && entry.ns === INVENTORY_NAMESPACE)
-  if (!isRecord(view) || !isRecord(view.base)) return undefined
-  const { shelves, error } = view.base
-  return {
-    shelves: Array.isArray(shelves)
-      ? shelves.flatMap((shelf): ShelfInfo[] => isRecord(shelf) && typeof shelf.name === 'string'
-        ? [{
-            name: shelf.name,
-            path: typeof shelf.path === 'string' ? shelf.path : '',
-            connected: shelf.connected === true,
-          }]
-        : [])
-      : [],
-    error: typeof error === 'string' ? error : '',
-  }
 }
 
 /**
