@@ -43,7 +43,8 @@ dsh plugin --profile web add dsh-hypatia-auto-memory
 
 Repeat for other profiles (desktop, dsh-tui). Restart the profile after install.
 
-The browser settings card is pre-built in `lib/client.js` and shipped with the
+The browser half — the settings card and the conversation's Memory tab — is
+pre-built in `lib/client.js` and shipped with the
 package. If you edit `src/client/*`, run `npm install && npm run build` in this
 directory to regenerate it; while `pnpm run dev:web` is active in the DSH
 checkout, client-plugin changes reload without a full page refresh.
@@ -253,6 +254,49 @@ agent/session-start ──▶ rules/taboos inject()
   in agent sessions — presets load disk skills in a nearer layer — so it is
   reported with its directory.
 
+- **The conversation's Memory tab** is the read face of everything above. It sits
+  beside the **Chat** and **Trajectory** tabs (a `conversation.view` entry with
+  id `memory`, ordered after Trajectory) and shows, for the session it is bound
+  to, three things. **Status**: the logging and consolidation watermarks, the
+  pending token backlog, whether the `session-<id>` node exists, and any task
+  that exhausted its attempts together with the error that stopped it.
+  **Span summaries**: the `sum-<session>-<from>-<to>` entries consolidation
+  produced, with their archive tier. **Work units**: the `wu-*` entries derived
+  from those summaries, reached through the `derivedFrom` edges — their names are
+  content-addressed, so the edge is the only way to find them. Bodies render
+  through the shell's own `MarkdownText`, so a summary reads like assistant
+  Markdown elsewhere in the GUI.
+
+  Raw `msg-*` entries are deliberately **not** shown: they hold the conversation
+  verbatim, the reader just wrote them, and the agent is the right reader for
+  them.
+
+  The data arrives over a session-scoped, read-only HTTP route this plugin
+  registers on the DSH web server, `/api/dsh-hypatia-auto-memory/session`: status
+  from the in-memory state tables on every poll, the shelf content only when it
+  can have changed (on open, on a session switch, on a manual refresh, and when
+  consolidation advances the session's watermark), cached for 15 s in between.
+  Two channels were rejected on the way here. A **session projection** would be
+  the best shape, but the event that would drive it cannot be written from
+  outside this repository: `Session.append` offers no way to set the envelope's
+  `ignorable` marker, and the persistence read path refuses a session log
+  carrying an unknown event type without it — so a custom event would break
+  session reload. A **settings namespace** can be written safely but is
+  root-scoped: the Host cannot know which session the browser is showing, so it
+  would have to ship every session's data, and publishing means disposing and
+  re-creating the owning fiber, because `settings.register` refuses a duplicate
+  namespace and has no way to update a registered `base`.
+
+  The route is not one of the composed app's authenticated routes — a route a
+  plugin registers never is — so it authenticates itself the way
+  `dsh-hypatia-ui`'s does: the socket must be loopback, the `Host` must be a
+  loopback name (`localhost`, `127.x`, `[::1]`), and the request same-origin. A
+  browser tab on this page passes all three; a page on another origin fails the
+  last even from the same machine, and a DNS-rebound page fails the `Host` check.
+  `~/.dsh/storages/hypatia_auto_memory.json` and
+  `hypatia_auto_memory_diag.json` remain the durable record; the tab is a view of
+  the same facts, not a replacement for them.
+
 ## Configuration
 
 Settings namespace `hypatia-auto-memory` (edit `settings.yaml` or Web
@@ -350,9 +394,13 @@ changes. No card claims it, so it renders nowhere; nothing ever writes to it.
 ## Operations checklist
 
 1. After a turn ends, entries appear within seconds:
-   `hypatia knowledge-get msg-<sessionId>-<n>` (`n` counts messages, from 0)
+   `hypatia knowledge-get msg-<sessionId>-<n>` (`n` counts messages, from 0).
+   The conversation's **Memory** tab answers the same question without a CLI,
+   and adds what the CLI cannot show: the watermarks themselves.
 2. Watermarks live in the state domain; failed tasks stay in the `tasks`
-   table with their last error for inspection.
+   table with their last error for inspection. Both are what the Memory tab
+   reads; refresh it after changing the shelf, since the tab's snapshot is
+   keyed to the shelf this run is writing to.
 3. Restart mid-write is safe: messages already stored are skipped
    (get-before-create); uncovered ranges are re-enqueued from watermarks.
 4. To check the route warning: consolidation with no selected `models`
@@ -499,7 +547,7 @@ dsh-hypatia-auto-memory/
 │   ├── auto-approve.js   # approves the agent's own plain bash hypatia calls
 │   ├── skills.js         # bundled skill registration (never shadows another provider)
 │   ├── status.js         # counters + structured logging
-│   └── client/           # browser settings card
+│   └── client/           # settings card + Memory tab
 │       ├── index.tsx     # client plugin entry + slot registration
 │       ├── SettingsCard.tsx
 │       ├── shelves.ts    # shelf dropdown choices from the inventory namespace

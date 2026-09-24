@@ -38,9 +38,10 @@ dsh plugin --profile web add dsh-hypatia-auto-memory
 
 对其它 profile（desktop、dsh-tui）重复以上步骤。安装后重启 profile。
 
-浏览器设置卡片预构建在 `lib/client.js` 中，随包发布。如果你改了 `src/client/*`，
-在本目录运行 `npm install && npm run build` 重新生成它；当 DSH checkout 里
-`pnpm run dev:web` 处于运行状态时，client-plugin 的改动无需整页刷新即可热更新。
+浏览器半——设置卡片与会话里的记忆标签页——预构建在 `lib/client.js` 中，随包发布。如果
+你改了 `src/client/*`，在本目录运行 `npm install && npm run build` 重新生成它；当 DSH
+checkout 里 `pnpm run dev:web` 处于运行状态时，client-plugin 的改动无需整页刷新即可
+热更新。
 
 **替换 `dsh-hypatia`：** 把它从 profile 移除并重启。
 
@@ -199,6 +200,36 @@ agent/session-start ──▶ rules/taboos inject()
   登记上去但在 Agent 会话里仍胜出——预设会在更近的一层加载磁盘技能——所以会连同目录
   一起报告。
 
+- **会话里的「记忆」标签页**是上述一切的读取面。它和 **对话**、**轨迹** 并排（一个
+  `conversation.view` 注册项，id 为 `memory`，排序在轨迹之后），对当前会话显示三块
+  内容。**状态**：记录水位、整合水位、待整合 token、`session-<id>` 节点是否存在，以及
+  用尽重试次数的任务和拦住它的那条错误。**跨度摘要**：整合产出的
+  `sum-<session>-<from>-<to>` 条目及其归档层级。**工作单元**：由这些摘要派生的 `wu-*`
+  条目——它们通过 `derivedFrom` 边找到，因为名字是内容寻址的，不携带会话信息。正文用
+  外壳自带的 `MarkdownText` 渲染，所以摘要读起来和 GUI 里其它地方的助手 Markdown
+  一致。
+
+  原始 `msg-*` 条目**故意不显示**：它是对话原文，读的人刚刚写过，而正确的读者是
+  Agent。
+
+  数据经由本插件注册在 DSH web 服务器上的、会话作用域的只读 HTTP 路由
+  `/api/dsh-hypatia-auto-memory/session` 到达浏览器：状态每次轮询都从内存中的状态表
+  现算，shelf 内容只在可能变化时才读（打开时、切换会话时、手动刷新时，以及整合推进了
+  该会话水位时），其间缓存 15 秒。路上否掉了两条通道。**session projection** 形态最
+  合适，但驱动它的事件在本仓库之外写不出来：`Session.append` 没有任何途径设置信封的
+  `ignorable` 标记，而持久化读取路径会拒绝一个带着未知事件类型、又没有该标记的会话
+  日志——所以自定义事件会破坏会话重载。**设置命名空间**能安全写入，但它是根作用域的：
+  宿主无法知道浏览器正在看哪个会话，只能把每个会话的数据都发出去；而且发布意味着销毁
+  并重建持有它的 fiber，因为 `settings.register` 拒绝重名命名空间，也没有任何途径更新
+  已注册的 `base`。
+
+  这条路由不属于组合应用自己那批已鉴权的路由——插件注册的路由从来都不是——所以它像
+  `dsh-hypatia-ui` 那样自鉴权：socket 必须是回环，`Host` 必须是回环名（`localhost`、
+  `127.x`、`[::1]`），请求必须同源。本页面里的浏览器标签三条都满足；另一来源的页面
+  即便同机也会在最后一条上失败，DNS 重绑定的页面会在 `Host` 检查上失败。
+  `~/.dsh/storages/hypatia_auto_memory.json` 和 `hypatia_auto_memory_diag.json` 仍是
+  持久记录；标签页是同一批事实的视图，不是它们的替代品。
+
 ## 配置
 
 设置命名空间 `hypatia-auto-memory`（编辑 `settings.yaml` 或 Web 设置；所有字段可选，
@@ -287,8 +318,12 @@ rules/taboos 预载、启动清理。设置卡片把它做成 `hypatia list` 所
 ## 运维清单
 
 1. 一个 turn 结束后，条目在几秒内出现：
-   `hypatia knowledge-get msg-<sessionId>-<n>`（`n` 从 0 开始数消息）
-2. 水位在 state domain 里；失败的任务连同最后一次错误留在 `tasks` 表里供检查。
+   `hypatia knowledge-get msg-<sessionId>-<n>`（`n` 从 0 开始数消息）。
+   会话里的**记忆**标签页不用敲 CLI 就能回答同一个问题，并且能给出 CLI 看不到的东西：
+   水位本身。
+2. 水位在 state domain 里；失败的任务连同最后一次错误留在 `tasks` 表里供检查。这两者
+   就是记忆标签页读的内容；换过 shelf 后要刷新它，因为它读的快照对应本次运行正在写入
+   的那个 shelf。
 3. 写入中途重启是安全的：已存储的消息被跳过（get-before-create）；未覆盖的范围从
    水位重新排队。
 4. 检查路由告警：没选 `models` 的巩固只记录一次告警，其余时间静默。
@@ -408,7 +443,7 @@ dsh-hypatia-auto-memory/
 │   ├── auto-approve.js   # 批准 Agent 自己的纯 bash hypatia 调用
 │   ├── skills.js         # 随包技能注册（从不遮蔽其它提供者）
 │   ├── status.js         # 计数器 + 结构化日志
-│   └── client/           # 浏览器设置卡片
+│   └── client/           # 设置卡片 + 记忆标签页
 │       ├── index.tsx     # client 插件入口 + slot 注册
 │       ├── SettingsCard.tsx
 │       ├── shelves.ts    # 来自清单命名空间的 shelf 下拉选项

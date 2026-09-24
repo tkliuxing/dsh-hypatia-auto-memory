@@ -38,6 +38,8 @@ import { countLoggableMessages, createCollector, formatSpan } from './collector.
 import { createCascade } from './cascade.js'
 import { createConsolidator, PLUGIN_NAME } from './consolidator.js'
 import { openModelLog } from './model-log.js'
+import { buildStatus } from './memory-status.js'
+import { createMemoryApi } from './memory-api.js'
 import { createRecall } from './recall.js'
 import { createPersistedSessions } from './persisted-session.js'
 import { createAutoApprove } from './auto-approve.js'
@@ -122,6 +124,24 @@ function applyCollect(ctx, cordisConfig) {
       getConfig: () => configHandle.get().queue,
       status,
     })
+
+    /**
+     * Wrap a consolidation-side executor so its settle drops that session's
+     * cached content. The memory API serves summaries and work units out of a
+     * cache (they cost hypatia round trips), and consolidation and cascade are
+     * exactly what change them — invalidating here is what makes the tab show
+     * the new summary without waiting for the cache's own expiry. The API is
+     * mounted by a child fiber below, so it is reached through `shared`,
+     * late-bound; `finally` covers a failed run too, since it may have written
+     * part of its output before failing.
+     */
+    const invalidatingContent = (executor) => async (task) => {
+      try {
+        return await executor(task)
+      } finally {
+        shared.memoryApi?.invalidate(task.sessionId)
+      }
+    }
     const cli = createHypatiaClient(ctx, {
       get binaries() {
         return configHandle.get().binaries
@@ -162,10 +182,12 @@ function applyCollect(ctx, cordisConfig) {
       if (found === undefined) status.warn(`shelf "${shelf}" is not registered with hypatia; every write will fail until it is (hypatia connect <dir> --name ${shelf})`)
       else if (!found.connected) status.warn(`shelf "${shelf}" is registered but not connected; writes will fail until it is`)
     })
-    // Late-bound: adjudication needs a model route, which only the consolidate
-    // fiber has. Without it the writer stores a unit with no relationship, which
-    // is the correct degradation — never a guessed one.
-    const shared = { consolidator: undefined }
+    // Late-bound handles to the optional child fibers. Adjudication needs a
+    // model route, which only the consolidate fiber has — without it the writer
+    // stores a unit with no relationship, which is the correct degradation,
+    // never a guessed one. The memory API is late-bound for the same reason: it
+    // needs `webServer`, and a headless composition has none.
+    const shared = { consolidator: undefined, memoryApi: undefined }
 
     const writer = createWriter(cli, {
       status,
@@ -316,6 +338,35 @@ function applyCollect(ctx, cordisConfig) {
     await collector.backfillLiveSessions()
     status.info('collector running (backfill complete)')
 
+    // The conversation tab's read side. Optional: it needs `webServer`, so a
+    // headless or TUI composition simply has no Memory tab and nothing else
+    // changes. The route authenticates itself — see memory-api.js.
+    ctx.plugin({
+      name: `${name}/memory-api`,
+      inject: ['webServer'],
+      apply: (c) => {
+        const api = createMemoryApi({
+          cli,
+          read: (sessionId) => buildStatus({
+            progressEntries: state.progress.entries(),
+            taskEntries: state.tasks.entries(),
+            sessionId,
+          }),
+          status,
+        })
+        c.effect(() => {
+          const unregister = c.webServer.register(api.route)
+          shared.memoryApi = api
+          return () => {
+            unregister()
+            // Only if this fiber's own API is still the live one: a reload may
+            // have mounted a successor before this disposer runs.
+            if (shared.memoryApi === api) shared.memoryApi = undefined
+          }
+        }, `${name}: memory API route`)
+      },
+    })
+
     // Both passes need `sessionPersistence` for the full listing — live sessions
     // alone would make every unloaded session look gone, and carry the cwd a
     // scope is resolved from. A child fiber, registered only after the reconcile
@@ -382,7 +433,7 @@ function applyCollect(ctx, cordisConfig) {
           modelLog,
           projectFor: collector.projectFor,
         })
-        queue.registerExecutor('consolidate', consolidator.execute)
+        queue.registerExecutor('consolidate', invalidatingContent(consolidator.execute))
         // Shares the consolidator's route cursor so every model attempt — span
         // summary, adjudication, archive — rotates through the selected routes
         // together rather than each keeping its own place in the rotation.
@@ -394,7 +445,7 @@ function applyCollect(ctx, cordisConfig) {
           status,
           modelLog,
         })
-        queue.registerExecutor('cascade', cascade.execute)
+        queue.registerExecutor('cascade', invalidatingContent(cascade.execute))
         shared.consolidator = consolidator
       },
     })

@@ -1,9 +1,11 @@
 /**
  * Browser half of dsh-hypatia-auto-memory: contributes a settings card under
- * Settings → Plugins, keyed by the `hypatia-auto-memory` namespace.
+ * Settings → Plugins, keyed by the `hypatia-auto-memory` namespace, and a
+ * per-session Memory tab beside the conversation's Chat and Trajectory tabs.
  *
  * The Host plugin already registers the schema and namespace; this half only
- * renders the form and routes edits through `ctx.settingsScope`.
+ * renders the form and routes edits through `ctx.settingsScope`. The Memory tab
+ * reads the Host's read-only status namespace (see `src/memory-status.js`).
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -15,10 +17,15 @@ import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SettingsScopeBinder } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
+// Type-only: the 'conversation.view' SlotMap row is declared by the conversation
+// shell, so the registration below only type-checks with its merge in the program.
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { createElement } from 'react'
 import { SettingsCard } from './SettingsCard'
 import type { ConfigShape } from './SettingsCard'
 import type { LoadConsolidationModelCatalog } from './consolidation-models'
+import { MemoryView } from './MemoryView'
+import { fetchMemory } from './memory-client'
 import { readShelfInventory, type LoadShelfInventory } from './shelves'
 import { en, NS, zh } from './locales'
 
@@ -99,8 +106,31 @@ export function apply(ctx: Context): void {
     ),
   )
 
+  // The Memory tab's data: one same-origin request to the route this plugin's
+  // Host half registers (see `src/memory-api.js`), parameterized by the session
+  // the tab is bound to — which is why it is a route and not the settings
+  // descriptor read the shelf listing uses.
+  // The tab label reads through a bound translate so it follows the active
+  // locale without re-registration, exactly as ui-trajectory's does.
+  const t = locale.bind(NS)
+  const unregisterMemoryView = ctx.slots.inject('conversation.view', () =>
+    ctx.slots.register(
+      {
+        name: 'conversation.view',
+        id: 'memory',
+        // After Chat (0) and Trajectory (10).
+        order: 20,
+        locale: NS,
+        label: () => t('viewMemory'),
+        inject: () => ({ fetch: fetchMemory }),
+      },
+      MemoryView,
+    ),
+  )
+
   ctx.effect(() => () => {
     unregister()
+    unregisterMemoryView()
     releaseApply()
   })
 }

@@ -1,0 +1,312 @@
+/* The conversation Memory tab: a diagnostic panel in the shell's own vocabulary. */
+
+.panel {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  width: 100%;
+  box-sizing: border-box;
+  flex-direction: column;
+  align-items: center;
+  overflow-y: auto;
+  /* ConversationRoot publishes the floating composer's live height; the view
+     owns its scroller under the overlay, so the last line has to clear it. */
+  padding: 16px;
+  padding-bottom: calc(var(--dsh-composer-height, 152px) + 16px);
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+/*
+ * One measured column instead of the full panel width. A key/value row spread
+ * across a 27-inch window puts a label and its value a screen apart, which is
+ * what this bounds; the same limit keeps summary prose at a readable line
+ * length.
+ */
+.column {
+  display: flex;
+  width: 100%;
+  max-width: 880px;
+  min-width: 0;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.title {
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.headMeta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.updated {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+
+.refresh {
+  appearance: none;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: 8px;
+  background: none;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 8px;
+}
+
+.refresh:hover {
+  border-color: var(--dsw-alias-label-dimmed);
+  color: var(--dsw-alias-label-primary);
+}
+
+.refresh:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+
+.status,
+.hint,
+.error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.status,
+.hint {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.error {
+  color: var(--dsw-alias-label-error);
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
+  padding-top: 16px;
+}
+
+.groupTitle {
+  display: flex;
+  margin: 0;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.count {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * A definition list laid out as ONE grid, not one flex row per pair: `max-content`
+ * keeps each value immediately after its label whatever the panel's width, and
+ * the shared grid keeps the values aligned in a column. `space-between` was the
+ * bug — on a wide screen it pushed the two ends of every row to the edges.
+ */
+.rows {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+  column-gap: 20px;
+  row-gap: 7px;
+  margin: 0;
+}
+
+.row {
+  display: contents;
+}
+
+.label {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.value {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.calm,
+.busy {
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.calm {
+  color: var(--dsw-alias-label-tertiary);
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.busy {
+  color: var(--dsw-alias-label-primary);
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  background: var(--dsw-alias-bg-layer-3);
+}
+
+.failures {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.failure {
+  display: grid;
+  gap: 2px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+  padding: 8px 10px;
+}
+
+.failureKind {
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+}
+
+.failureError {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* -------------------------------------------------------- distilled entries -- */
+
+.entries {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.entry {
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2);
+  overflow: hidden;
+}
+
+.entryHead {
+  display: flex;
+  width: 100%;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  appearance: none;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 8px 12px;
+  text-align: left;
+}
+
+.entryHead:hover {
+  background: var(--dsw-alias-bg-layer-3);
+}
+
+.entryHead:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: -2px;
+}
+
+.entryName {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dsw-alias-label-secondary);
+  font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entryMeta {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.badge {
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.entryTime {
+  color: var(--dsw-alias-label-quaternary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.entryToggle {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.entryBody {
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.entryPreview {
+  margin: 0;
+  overflow: hidden;
+  padding: 0 12px 10px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hint {
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
+  padding-top: 12px;
+}
