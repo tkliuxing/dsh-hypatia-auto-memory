@@ -1,6 +1,6 @@
 {
   "name": "dsh-hypatia-auto-memory",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Event-driven Hypatia memory for DSH: automatic conversation logging via session events, queued background consolidation (span summaries + work-unit extraction) with a dedicated model route, and recall injection — zero per-call model work in the main session.",
   "type": "module",
   "main": "src/index.js",
