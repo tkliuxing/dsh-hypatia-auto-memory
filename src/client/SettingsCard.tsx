@@ -16,9 +16,11 @@ import {
   consolidationModelKey,
   moveConsolidationModel,
   orderedConsolidationModels,
+  reasoningEffortChoices,
   type ConsolidationModelCandidate,
   type ConsolidationModelRoute,
   type LoadConsolidationModelCatalog,
+  type ReasoningEffortChoice,
 } from './consolidation-models'
 import { DEFAULT_SHELF, shelfChoices, type LoadShelfInventory, type ShelfInfo } from './shelves'
 import css from './SettingsCard.module.css'
@@ -224,6 +226,56 @@ export function SettingsCard({ scope, loadModelCatalog, loadShelfInventory, t }:
       }
     })
   }, [disabled, saving])
+
+  /**
+   * Set or clear one route's thinking level. Clearing REMOVES the key rather
+   * than storing `undefined`, so the saved patch carries only what the user
+   * chose and nothing reading the profile can confuse "not configured" with
+   * "configured as nothing".
+   */
+  const setModelEffort = useCallback((index: number, effort: string | undefined) => {
+    if (disabled || saving) return
+    setDraft((current) => {
+      const currentConsolidation = current.consolidation ?? DEFAULT_CONSOLIDATION
+      const currentModels = currentConsolidation.models ?? []
+      if (index < 0 || index >= currentModels.length) return current
+      const models = currentModels.map((route, at) => {
+        if (at !== index) return route
+        if (effort === undefined) {
+          const cleared = { ...route }
+          delete cleared.reasoningEffort
+          return cleared
+        }
+        return { ...route, reasoningEffort: effort }
+      })
+      return {
+        ...current,
+        consolidation: { ...currentConsolidation, models },
+      }
+    })
+  }, [disabled, saving])
+
+  /** Display label for one thinking-level option, in the card's own words. */
+  const effortChoiceLabel = useCallback((choice: ReasoningEffortChoice): string => {
+    if (choice.effort === undefined) return t('reasoningFollowPurpose')
+    const name = choice.name ?? choice.effort
+    // A value the route no longer declares is shown, not hidden: rewriting the
+    // user's configuration behind their back is worse than showing a stale one.
+    return choice.stale === true ? `${name} · ${t('reasoningStale')}` : name
+  }, [t])
+
+  /**
+   * What the adapter does when no effort is sent. Only a hint: this plugin
+   * cannot pin it, because omitting the field is what lets its own per-purpose
+   * policy apply.
+   */
+  const routeDefaultLabel = useCallback((candidate: ConsolidationModelCandidate): string | undefined => {
+    const reasoning = candidate.reasoning
+    const fallback = reasoning?.defaultEffort
+    if (reasoning === undefined || fallback === undefined) return undefined
+    const named = reasoning.efforts.find(effort => effort.id === fallback)
+    return t('reasoningDefault', { effort: named?.name ?? fallback })
+  }, [t])
 
   const discard = useCallback(() => {
     setDraft(resolved)
@@ -451,6 +503,20 @@ export function SettingsCard({ scope, loadModelCatalog, loadShelfInventory, t }:
                         <span className={css.modelName}>{candidate.modelName}</span>
                         <span className={css.route}>{`${candidate.providerName} · ${candidate.provider}/${candidate.model}`}</span>
                       </span>
+                      <select
+                        className={css.effort}
+                        aria-label={`${t('reasoningEffort')}: ${candidate.modelName}`}
+                        title={candidate.reasoning === undefined
+                          ? t('reasoningUnavailable')
+                          : routeDefaultLabel(candidate) ?? t('reasoningFollowPurpose')}
+                        value={candidate.reasoningEffort ?? ''}
+                        disabled={disabled || saving || candidate.reasoning === undefined}
+                        onChange={(event) => setModelEffort(index, event.target.value === '' ? undefined : event.target.value)}
+                      >
+                        {reasoningEffortChoices(candidate.reasoning, candidate.reasoningEffort).map(choice => (
+                          <option key={choice.key} value={choice.effort ?? ''}>{effortChoiceLabel(choice)}</option>
+                        ))}
+                      </select>
                       {!candidate.available ? <span className={css.unavailable}>{t('modelUnavailable')}</span> : null}
                       <span className={css.rowActions}>
                         <button
@@ -505,6 +571,7 @@ export function SettingsCard({ scope, loadModelCatalog, loadShelfInventory, t }:
                 </fieldset>
               </>
             ) : catalogStatus === 'ready' ? <p className={css.notice}>{t('modelCatalogEmpty')}</p> : null}
+            <p className={css.hint}>{t('reasoningBudgetHint')}</p>
           </div>
 
           <div className={css.pairedFields}>

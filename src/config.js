@@ -121,10 +121,20 @@ export const DEFAULTS = {
  * (see `selectConsolidationRoute` in consolidator.js). Nothing here expresses
  * that — position does — so a reordering IS a behavior change, and the settings
  * card is the only editor that lets a user set it.
+ *
+ * `reasoningEffort` is the optional per-route thinking level. The vocabulary is
+ * ADAPTER-OWNED and opaque (see reasoning.js), so this schema cannot validate a
+ * value against it — it only refuses a blank. A value the route does not declare
+ * is dropped at call time with a warning rather than sent to a guaranteed core
+ * rejection. Absent means "follow the purpose policy", which is what every call
+ * did before the field existed.
  */
 const ConsolidationModelSchema = z.object({
   provider: z.string().pattern(/\S/),
   model: z.string().pattern(/\S/),
+  // Absent by default (schemastery fields are nullable unless `.required()`),
+  // which is what makes "no configured effort" the pre-existing behavior.
+  reasoningEffort: z.string().pattern(/\S/),
 })
 
 /**

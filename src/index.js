@@ -39,6 +39,7 @@ import { countLoggableMessages, createCollector, formatSpan } from './collector.
 import { createCascade } from './cascade.js'
 import { createConsolidator, PLUGIN_NAME } from './consolidator.js'
 import { openModelLog } from './model-log.js'
+import { createReasoningResolver } from './reasoning.js'
 import { buildStatus } from './memory-status.js'
 import { createMemoryApi } from './memory-api.js'
 import { createRecall } from './recall.js'
@@ -486,6 +487,10 @@ function applyCollect(ctx, configHandle, status) {
       name: `${name}/consolidate`,
       inject: ['llm', 'sessions'],
       apply: (c) => {
+        // One capability cache and one set of "your configured effort was
+        // dropped" warnings for both executors: extraction, adjudication and the
+        // archive all resolve their thinking level through this.
+        const reasoning = createReasoningResolver({ llm: c.llm, status })
         const consolidator = createConsolidator({
           queue,
           progress: state.progress,
@@ -499,12 +504,14 @@ function applyCollect(ctx, configHandle, status) {
           getConfig: configHandle.get,
           status,
           modelLog,
+          reasoning,
           projectFor: collector.projectFor,
         })
         queue.registerExecutor('consolidate', invalidatingContent(consolidator.execute))
-        // The same priority selector the consolidator uses, but no shared
-        // state: each executor holds its own task's `attempts`, so an archive
-        // retry degrades down the same list the summary just degraded down.
+        // The same priority selector and the same reasoning resolver as the
+        // consolidator, but no shared cursor: each executor holds its own task's
+        // `attempts`, so an archive retry degrades down the same list the
+        // summary just degraded down.
         const cascade = createCascade({
           cli,
           llm: c.llm,
@@ -512,6 +519,7 @@ function applyCollect(ctx, configHandle, status) {
           getConfig: configHandle.get,
           status,
           modelLog,
+          reasoning,
         })
         queue.registerExecutor('cascade', invalidatingContent(cascade.execute))
         shared.consolidator = consolidator

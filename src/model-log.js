@@ -46,6 +46,19 @@ export const MODEL_CALL_LIMIT = 100
  *   for a stop that yielded no summary would make the table lie.
  * - `error`    — the call itself threw (provider/transport failure).
  *
+ * `effort` is the reasoning effort the call ACTUALLY sent, recorded because the
+ * configured one is not always the sent one: a route that does not declare a
+ * value is not sent it (the core would reject the request outright with
+ * `UNSUPPORTED_REASONING_EFFORT`), so this column is the only place a dropped
+ * setting is distinguishable from an honoured one. Empty means the call sent
+ * none, which for this plugin means the adapter's own default applied.
+ *
+ * `outputTokens` / `reasoningTokens` come from the stream's `usage` chunk and
+ * are the measurement behind `THINKING_OUTPUT_ALLOWANCE`: they answer "did the
+ * output cap go to the answer or to the reasoning", which `outcome` alone
+ * cannot. Both are 0 when the route reported no usage — an adapter is not
+ * obliged to send one, and `reasoningTokens` is optional even then.
+ *
  * `detail` carries a finish kind, a fixed label, or a provider error message —
  * never message content and never model output. The plugin's whole log path is
  * built to keep conversation text out of places a later reader can stumble
@@ -64,11 +77,28 @@ export const modelCallTable = domainTable(z.object({
   purpose: z.string().default(''),
   provider: z.string().default(''),
   model: z.string().default(''),
+  /** The reasoning effort actually sent; empty when the call sent none. */
+  effort: z.string().default(''),
   outcome: z.string().default('pending'),
   /** Wall time from selection to settle; 0 while pending. */
   ms: z.number().min(0).default(0),
+  /** Output tokens the route reported; 0 when it reported none. */
+  outputTokens: z.number().min(0).default(0),
+  /** Reasoning tokens the route reported; 0 when absent (it is optional). */
+  reasoningTokens: z.number().min(0).default(0),
   detail: z.string().default(''),
 }))
+
+/**
+ * A provider token count, or 0 when there is nothing usable to store.
+ *
+ * Defensive on purpose: the table REFUSES a negative or non-finite number, and a
+ * refused write on the settle path would leave the row stuck at `pending`
+ * forever — worse than losing one count.
+ */
+function tokenCount(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0
+}
 
 /** Upper bound on `detail`; see the table doc. Applied on every write. */
 export const DETAIL_MAX = 200
@@ -156,9 +186,15 @@ export function createModelLog({ table, status, limit = MODEL_CALL_LIMIT, now = 
    *
    * @param {string} purpose - The same string handed to `llm.stream`.
    * @param {{provider: string, model: string}} route
-   * @returns {{seq: number, finish: (outcome: string, detail?: string) => Promise<void>}}
+   * @param {string} [effort] - The reasoning effort the call is about to send,
+   * which is NOT the configured one when the route refused it. Absent means the
+   * call sends none.
+   * @returns {{
+   *   seq: number,
+   *   finish: (outcome: string, detail?: string, usage?: {outputTokens?: number, reasoningTokens?: number}) => Promise<void>,
+   * }}
    */
-  function begin(purpose, route) {
+  function begin(purpose, route, effort) {
     counter += 1
     const seq = counter
     const at = now()
@@ -169,8 +205,11 @@ export function createModelLog({ table, status, limit = MODEL_CALL_LIMIT, now = 
       purpose,
       provider: String(route?.provider ?? ''),
       model: String(route?.model ?? ''),
+      effort: typeof effort === 'string' ? effort : '',
       outcome: 'pending',
       ms: 0,
+      outputTokens: 0,
+      reasoningTokens: 0,
       detail: '',
     }
     // Durable before the call runs, so an attempt that never settles still
@@ -178,7 +217,7 @@ export function createModelLog({ table, status, limit = MODEL_CALL_LIMIT, now = 
     const stored = table === undefined ? Promise.resolve() : write(key, record)
     return {
       seq,
-      async finish(outcome, detail = '') {
+      async finish(outcome, detail = '', usage) {
         // Never rejects, and callers do not await it: every one of them calls
         // this from a `finally`, where a throw here would replace the error the
         // queue was going to see, and a storage stall would hold the queue task
@@ -187,11 +226,19 @@ export function createModelLog({ table, status, limit = MODEL_CALL_LIMIT, now = 
           await stored
           const ms = Math.max(0, now() - at)
           const bounded = String(detail).slice(0, DETAIL_MAX)
+          const outputTokens = tokenCount(usage?.outputTokens)
+          const reasoningTokens = tokenCount(usage?.reasoningTokens)
           if (table !== undefined) {
-            await write(key, { ...record, outcome, ms, detail: bounded })
+            await write(key, { ...record, outcome, ms, outputTokens, reasoningTokens, detail: bounded })
           }
+          const sent = record.effort === '' ? '' : ` effort=${record.effort}`
+          const split = outputTokens === 0 && reasoningTokens === 0
+            ? ''
+            : ` out=${outputTokens} reasoning=${reasoningTokens}`
           const suffix = bounded === '' ? '' : ` (${bounded})`
-          status.info(`model call: ${purpose} ${record.provider}/${record.model} ${outcome} ${ms}ms${suffix}`)
+          status.info(
+            `model call: ${purpose} ${record.provider}/${record.model}${sent} ${outcome} ${ms}ms${split}${suffix}`,
+          )
         } catch (error) {
           onWriteError(error)
         }

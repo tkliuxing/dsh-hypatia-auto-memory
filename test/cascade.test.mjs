@@ -2,15 +2,16 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { archiveName, createCascade, levelTag, notSummarisedQuery } from '../src/cascade.js'
+import { THINKING_OUTPUT_ALLOWANCE } from '../src/consolidator.js'
 import { makeModelLogDouble } from './model-log-double.mjs'
 
 const ROUTE = { provider: 'p', model: 'm' }
 
-function makeConfig({ batchSize = 3, enabled = true } = {}) {
+function makeConfig({ batchSize = 3, enabled = true, models = [ROUTE], maxOutputTokens = 2000 } = {}) {
   return () => ({
     consolidation: {
-      models: [ROUTE],
-      maxOutputTokens: 2000,
+      models,
+      maxOutputTokens,
       timeoutMs: 30_000,
       cascade: { enabled, batchSize },
     },
@@ -50,18 +51,28 @@ function makeCli(entriesByTag) {
   }
 }
 
-function makeLlm(titles = []) {
+function makeLlm(titles = [], { reasoningEfforts, usage } = {}) {
   let call = 0
   return {
     prompts: [],
+    requests: [],
+    // Absent unless a test declares it, so the purpose policy's silent path is
+    // the one most tests exercise.
+    ...reasoningEfforts === undefined ? {} : {
+      async resolveModelInfo() {
+        return { reasoning: { efforts: reasoningEfforts.map((id) => ({ id })) } }
+      },
+    },
     async *stream(request) {
       const title = titles[call] ?? `Tier archive ${call}`
       call += 1
       this.prompts.push(request.messages[0].content[0].text)
+      this.requests.push(request)
       const payload = JSON.stringify({ title, summary: '- archived' })
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: payload }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: payload } }
+      if (usage !== undefined) yield { type: 'usage', usage }
       yield { type: 'finish', reason: { kind: 'stop' } }
     },
   }
@@ -145,6 +156,70 @@ test('a cascading run picks one route and archives every tier with it', async ()
   await cascade.execute({ project: 'demo', attempts: 0 })
 
   assert.deepEqual(seen, [0], 'one selection for the whole climb')
+})
+
+test('the cascade sends the configured thinking level, with the cap to pay for it', async () => {
+  // The archive is the one purpose whose default is to think, so this is where a
+  // per-route level earns its keep — and where the level must reach every tier
+  // of one climb, not just the first.
+  const entriesByTag = { [levelTag(1)]: tierEntries(levelTag(1), 9, 'sum-s1') }
+  const llm = makeLlm(['Storage rewrite'], { reasoningEfforts: ['off', 'low', 'high'] })
+  const modelLog = makeModelLogDouble()
+  const cascade = createCascade({
+    cli: makeCli(entriesByTag), llm,
+    selectRoute: () => ({ provider: 'p', model: 'm', reasoningEffort: 'high' }),
+    getConfig: makeConfig({ batchSize: 3, models: [{ provider: 'p', model: 'm', reasoningEffort: 'high' }] }),
+    status: silentStatus, modelLog,
+  })
+
+  // Three runs: 9 tier-1 entries at 3:1 fill tier 2 over three archive calls, and
+  // the third run also climbs to tier 3 — four calls, every one of them carrying
+  // the same level, because a run resolves it once and keeps it for the climb.
+  await cascade.execute({ project: 'demo', attempts: 0 })
+  await cascade.execute({ project: 'demo', attempts: 0 })
+  await cascade.execute({ project: 'demo', attempts: 0 })
+
+  assert.equal(llm.requests.length, 4, 'the oldest unfinished batch, plus the tier the third run completes')
+  assert.deepEqual([...new Set(llm.requests.map((r) => r.reasoningEffort))], ['high'])
+  assert.deepEqual([...new Set(llm.requests.map((r) => r.maxTokens))], [2000 + THINKING_OUTPUT_ALLOWANCE],
+    'thinking and the archive share the cap, so the allowance must be there')
+  assert.deepEqual(modelLog.attempts.map((a) => a.effort), ['high', 'high', 'high', 'high'])
+})
+
+test('the cascade sends no effort by default, leaving the adapter default alone', async () => {
+  // The purpose policy has no opinion here: an omitted effort is what lets
+  // `llm-deepseek` resolve its own default (`high`) instead of the plugin
+  // second-guessing it.
+  const entriesByTag = { [levelTag(1)]: tierEntries(levelTag(1), 3, 'sum-s1') }
+  const llm = makeLlm(['Storage rewrite'], { reasoningEfforts: ['off', 'high'] })
+  const modelLog = makeModelLogDouble()
+  const cascade = createCascade({
+    cli: makeCli(entriesByTag), llm, selectRoute: () => ROUTE,
+    getConfig: makeConfig({ batchSize: 3 }), status: silentStatus, modelLog,
+  })
+
+  await cascade.execute({ project: 'demo', attempts: 0 })
+
+  assert.equal(llm.requests[0].reasoningEffort, undefined, '`off` is extraction policy, not archive policy')
+  assert.equal(llm.requests[0].maxTokens, 2000 + THINKING_OUTPUT_ALLOWANCE)
+  assert.deepEqual(modelLog.attempts.map((a) => a.effort), [undefined])
+})
+
+test('the cascade records the token split of its archive call', async () => {
+  const entriesByTag = { [levelTag(1)]: tierEntries(levelTag(1), 3, 'sum-s1') }
+  const modelLog = makeModelLogDouble()
+  const cascade = createCascade({
+    cli: makeCli(entriesByTag),
+    llm: makeLlm(['Storage rewrite'], { usage: { inputTokens: 900, outputTokens: 700, reasoningTokens: 250 } }),
+    selectRoute: () => ROUTE,
+    getConfig: makeConfig({ batchSize: 3 }), status: silentStatus, modelLog,
+  })
+
+  await cascade.execute({ project: 'demo', attempts: 0 })
+
+  assert.deepEqual(modelLog.attempts.map((a) => a.usage), [
+    { inputTokens: 900, outputTokens: 700, reasoningTokens: 250 },
+  ])
 })
 
 test('a full batch archives one tier up and links every member', async () => {

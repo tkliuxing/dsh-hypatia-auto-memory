@@ -362,6 +362,31 @@
   min-width: 0;
 }
 
+/* Compact on purpose: one per priority row, and the row already carries an
+   ordinal, a name, a route, an availability badge and three buttons. */
+.effort {
+  flex: 0 0 auto;
+  max-width: 132px;
+  padding: 2px 4px;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.effort:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.effort:focus-visible {
+  border-color: var(--dsw-alias-brand-primary);
+  outline: none;
+}
+
 .rowActions {
   display: flex;
   align-items: center;

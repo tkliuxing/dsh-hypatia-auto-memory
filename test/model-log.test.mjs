@@ -8,6 +8,11 @@ import { createModelLog, modelCallTable, openModelLog } from '../src/model-log.j
  * validates on the way out at the next startup (mirrors state-schema.test.mjs).
  * A record written here that would not load back is a startup failure deferred
  * to tomorrow.
+ *
+ * It stores the PARSED value, which is what the real domain hands back on read:
+ * a field added to the schema with a `.default()` therefore appears filled in for
+ * a row written before it existed — the property the upgrade-safety test is
+ * about, and one a raw `set` would hide.
  */
 function strictTable(spec) {
   const map = new Map()
@@ -15,6 +20,7 @@ function strictTable(spec) {
   const check = (key, value) => {
     const result = spec.valueSchema.safeParse(value)
     if (!result.success) violations.push({ key, issues: result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`) })
+    return result
   }
   return {
     violations,
@@ -22,7 +28,11 @@ function strictTable(spec) {
     get size() { return map.size },
     get: (key) => map.get(key),
     entries: () => map.entries(),
-    put: (key, value) => { check(key, value); map.set(key, value); return Promise.resolve() },
+    put: (key, value) => {
+      const result = check(key, value)
+      map.set(key, result.success ? result.data : value)
+      return Promise.resolve()
+    },
     delete: (key) => Promise.resolve(map.delete(key)),
   }
 }
@@ -61,6 +71,76 @@ test('an attempt is recorded at selection and settled when it finishes', async (
   assert.equal(stored.model, 'gpt-5.6-luna')
   assert.equal(stored.purpose, 'memory-consolidation')
   assert.deepEqual(table.violations, [])
+})
+
+test('the effort a call SENT is recorded, and empty when it sent none', async () => {
+  // Not the configured one: a route that does not declare a value is not sent
+  // it, so this column is the only place a dropped setting is distinguishable
+  // from an honoured one.
+  const table = strictTable(modelCallTable)
+  const log = createModelLog({ table, status: recorder(), now: () => 0 })
+
+  await log.begin('memory-consolidation', LUNA, 'off').finish('ok')
+  await log.begin('memory-cascade', FLASH).finish('ok')
+  await log.begin('memory-consolidation', FLASH, '').finish('ok')
+
+  assert.deepEqual(log.recent().map((row) => [row.seq, row.effort]), [
+    [3, ''],
+    [2, ''],
+    [1, 'off'],
+  ])
+  assert.deepEqual(table.violations, [])
+})
+
+test('the token split is stored, and a route that reports none stores zeros', async () => {
+  const table = strictTable(modelCallTable)
+  const log = createModelLog({ table, status: recorder(), now: () => 0 })
+
+  await log.begin('memory-consolidation', FLASH, 'low')
+    .finish('incomplete', 'max-tokens', { inputTokens: 1200, outputTokens: 2000, reasoningTokens: 1800 })
+  // An adapter is not obliged to send a usage chunk at all.
+  await log.begin('memory-consolidation', LUNA, 'off').finish('ok')
+
+  assert.deepEqual(log.recent().map((row) => [row.outputTokens, row.reasoningTokens]), [
+    [0, 0],
+    [2000, 1800],
+  ])
+  assert.deepEqual(table.violations, [])
+})
+
+test('an unusable token count is stored as 0 rather than refusing the settle', async () => {
+  // The schema rejects a negative or non-finite number, and a refused write on
+  // the settle path would leave the row stuck at `pending` forever — worse than
+  // losing one count.
+  const table = strictTable(modelCallTable)
+  const log = createModelLog({ table, status: recorder(), now: () => 0 })
+
+  await log.begin('memory-consolidation', LUNA, 'low')
+    .finish('ok', '', { outputTokens: -5, reasoningTokens: Number.NaN })
+
+  const stored = table.get('000000000001')
+  assert.equal(stored.outcome, 'ok', 'the settle itself succeeded')
+  assert.deepEqual([stored.outputTokens, stored.reasoningTokens], [0, 0])
+  assert.deepEqual(table.violations, [])
+})
+
+test('a row written before effort and tokens existed still opens', async () => {
+  // Upgrade safety: the storage service validates on READ, so a field added
+  // without a default would make an existing state file fail its whole domain
+  // open at the next startup — taking the watermarks down with it.
+  const table = strictTable(modelCallTable)
+  const log = createModelLog({ table, status: recorder(), now: () => 0 })
+
+  const row = { seq: 1, at: 1000, purpose: 'memory-consolidation', provider: 'openai', model: 'gpt-5.6-luna', outcome: 'ok', ms: 900, detail: '' }
+  assert.equal(modelCallTable.valueSchema.safeParse(row).success, true, 'the old shape must still validate')
+
+  await table.put('000000000001', row)
+  const reread = createModelLog({ table, status: recorder(), now: () => 0 })
+  assert.deepEqual(reread.recent().map((r) => [r.seq, r.effort, r.outputTokens, r.reasoningTokens]), [
+    [1, '', 0, 0],
+  ])
+  // And the next attempt continues the sequence rather than reusing seq 1.
+  assert.equal(reread.begin('memory-consolidation', LUNA).seq, 2)
 })
 
 test('recent() answers newest-first, which is the question asked of it', async () => {

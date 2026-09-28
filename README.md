@@ -205,6 +205,16 @@ agent/created ──▶ rules/taboos inject()
   long. Cascade is the exception: it keeps thinking (it is compressing sixteen
   summaries, not filling a shape) and pays for it in the same allowance.
 
+  A route's `reasoningEffort` overrides all of that. Set it to a level the model
+  declares and every call on that route is sent that level — the allowance
+  follows, because anything other than `off` shares the cap with the answer. The
+  vocabulary is the adapter's own (the settings card offers exactly what the
+  model declares: `off`, `low`, `high`, `max` on `llm-deepseek`), and a value the
+  route does not declare is **dropped with one warning** rather than sent: the
+  core rejects an undeclared effort before any provider I/O, so sending it would
+  turn a profile typo into a task that retries and then fails permanently. Leave
+  the field out to keep the per-purpose policy above.
+
 - **Cascade** archives sixteen unarchived tier-N summaries into one tier-(N+1)
   entry, using hypatia's own `$not-summaried` (which anti-joins on
   `statement.tail` and orders `created_at ASC`, giving FIFO batching for free).
@@ -369,6 +379,15 @@ rather than inside one attempt. This replaced a round-robin that used every
 selected route regardless of preference; reorder the list, or use the card's
 ↑/↓ buttons, to change which route is preferred.
 
+**Each route may also set a thinking level.** `reasoningEffort` names an
+adapter-owned level — the settings card offers exactly what the model declares,
+which on `llm-deepseek` is `off`/`low`/`high`/`max`. Omitting it keeps the
+per-purpose policy described under *Consolidator* above; setting it overrides
+that policy for every call on that route, and the output cap grows to pay for
+it. A level the model does not declare is dropped at call time with one warning
+instead of being sent, because the core rejects an undeclared effort before any
+provider I/O.
+
 ```yaml
 hypatia-auto-memory:
   enabled: true
@@ -386,6 +405,9 @@ hypatia-auto-memory:
     # PRIORITY order: every consolidation tries the first route, and a retry
     # degrades to the next one (see the note above).
     models: []                   # select one or more { provider, model } routes
+    # Each route may also carry `reasoningEffort: <level>` — a thinking level the
+    # card offers from what the model declares (off/low/high/max on deepseek).
+    # Omit it to keep the per-purpose policy.
     maxInputTokens: 16000        # transcript cap (chars/4 estimate)
     maxOutputTokens: 2000
     timeoutMs: 120000
@@ -487,13 +509,17 @@ now only projects plugin Config forms.)
    newest first by `seq`, bounded to 100). The settings list is not the answer:
    `consolidation.models` is a priority order, and one task's rows walk it —
    the first attempt names the head, a retry names the next route down, which
-   is how a fallback is confirmed to have happened. `outcome` is `pending` (in
-   flight, or the process died mid-call), `ok` (a usable result was produced),
-   `incomplete` (the call settled without one — output cap, abort, unparseable
-   reply) or `error` (the call threw); in the last two the attempt was spent and
-   nothing was stored. `detail` is a finish kind, a fixed label, or the
-   provider's message, capped at 200 characters — never message content and
-   never model output.
+   is how a fallback is confirmed to have happened. `effort` is what the call
+   actually SENT, which is not the configured value when the route refused it;
+   `outputTokens` / `reasoningTokens` are the route's own usage report, and they
+   are what says whether the cap went to the answer or to the reasoning (both 0
+   when the route reports no usage). `outcome` is `pending` (in flight, or the
+   process died mid-call), `ok` (a usable result was produced), `incomplete`
+   (the call settled without one — output cap, abort, unparseable reply) or
+   `error` (the call threw); in the last two the attempt was spent and nothing
+   was stored. `detail` is a finish kind, a fixed label, or the provider's
+   message, capped at 200 characters — never message content and never model
+   output.
 6. `hypatia backfill --status` reports the shelf's embedding debt. With a
    current hypatia, logging a turn adds nothing to it; only summaries and work
    units are pending until the next flush. `hypatia scope list --count` shows
@@ -512,7 +538,7 @@ now only projects plugin Config forms.)
 | Entries appear only after a turn finishes | By design: spans are cut at `turn/end`, or at the first `step/end` once a turn has run longer than `flushWindowMs`, so an entry never lacks its own tool results |
 | Logging works, no summaries | `consolidation.models` is empty or invalid — one warning at first trigger |
 | Summaries but no `sum2-*` | Fewer than `cascade.batchSize` unarchived tier-1 summaries in that project yet |
-| Work units have no relationships | No embedding model on the shelf (`similar` fails), every candidate was beyond `dedupMaxDistance`, or the adjudication call itself produced no verdict — `model_calls` shows that as `incomplete` / `max-tokens`, which is what a thinking-enabled route does when it spends the whole output budget on reasoning before answering. The call now asks a route for `reasoningEffort: 'off'` once the adapter advertises it, and carries a 1024-token cap for routes that cannot honour it. Since hypatia #19 the local model is looked up in `~/.hypatia/models/<org>/<name>` (or the Hugging Face cache), no longer beside the shelf: a shelf that used to answer `similar` and now says `is not installed` needs `hypatia model install <model>`, or `hypatia model register <model> <dir>` pointing at the files it already has |
+| Work units have no relationships | No embedding model on the shelf (`similar` fails), every candidate was beyond `dedupMaxDistance`, or the adjudication call itself produced no verdict — `model_calls` shows that as `incomplete` / `max-tokens`, which is what a thinking-enabled route does when it spends the whole output budget on reasoning before answering. The call now asks a route for `reasoningEffort: 'off'` once the adapter advertises it, and carries a 1024-token cap for routes that cannot honour it — a route whose `reasoningEffort` names a real level instead gets that 1024 plus the thinking allowance. Since hypatia #19 the local model is looked up in `~/.hypatia/models/<org>/<name>` (or the Hugging Face cache), no longer beside the shelf: a shelf that used to answer `similar` and now says `is not installed` needs `hypatia model install <model>`, or `hypatia model register <model> <dir>` pointing at the files it already has |
 | `similar` still returns `msg-*` rows | They were written before this plugin opted the log layer out of embedding, or by a hypatia without `--no-embed`. Retract the knowledge vectors once with `embedding.skip_tags = ["message"]` in the shelf's `shelf.toml` followed by `hypatia backfill` (a binary older than the key refuses to open the shelf, so upgrade every binary sharing it first). Do not add `session` to that list: `skip_tags` matches any entry carrying the tag, and knowledge people write about sessions carries it too — one such entry lost its vector on the shelf this was tried on. The plugin's own `session-*` nodes are few and now opt out per write. Statements have no tags and no update command, so `belongTo` / `summary` edges written before keep their vectors |
 | Task in `deferred` state | Neither the live store nor persistence could supply its session. Not an error: it spends no attempts and runs as soon as one of them can. Normally storage answers immediately — the state persists only when `sessionPersistence` is absent from the composition, or its read failed (look for `could not be read` in the log). A deferred consolidation is re-queued by the next startup's backfill, so it does not wait for its session to be opened again |
 | Task in `failed` state | A hypatia or model error persisted after `maxAttempts`. Failed `log-message` records are pruned at the next startup, since the watermark re-derives their range; other kinds are kept for inspection — delete one to let the next trigger re-create it |
@@ -524,7 +550,8 @@ now only projects plugin Config forms.)
 | Duplicate `msg-*` after weird manual edits | Delete the entry in hypatia and lower `lastLoggedSeq` for that session in the state domain — backfill recreates it once |
 | The agent's own `hypatia` write still asks for approval | `autoApprove: false`, the command pipes/redirects/chains outside quotes, or its first word is not one of `binaries` — only plain calls are answered, by design. Reads never reach approval at all, so nothing to fix there |
 | The agent got a memory protocol that tells it to log messages by hand | Another plugin registered `hypatia-memory` first (`dsh-hypatia` still in the profile), or a `hypatia-memory` exists on disk — typically `~/.agents/skills/hypatia-memory`, written by `hypatia skill install --agent codex`. Agent presets load disk skills in a layer nearer than plugins, so it wins in sessions even though the skill center may list this plugin. Remove the copy the startup warning names |
-| Can't tell which model actually ran | The list is a priority order, so a task's first attempt names the head of `consolidation.models` and a retry names the route it degraded to. Each attempt lands in `~/.dsh/storages/hypatia_auto_memory_diag.json` (`model_calls`) with purpose, provider/model, outcome and duration — reading one task's rows top-down is how a fallback is confirmed. The usage ledger cannot answer this — it folds agent turns (`assistant/message`) and never sees a plugin's direct `llm.stream`. A `pending` row means the call is still in flight, or the process died mid-call: the row is written before the call and settled after it |
+| Can't tell which model actually ran | The list is a priority order, so a task's first attempt names the head of `consolidation.models` and a retry names the route it degraded to. Each attempt lands in `~/.dsh/storages/hypatia_auto_memory_diag.json` (`model_calls`) with purpose, provider/model, the `effort` actually sent, outcome, duration and the route's own token split — reading one task's rows top-down is how a fallback is confirmed, and `effort` is how a configured thinking level is confirmed to have been honoured. The usage ledger cannot answer this — it folds agent turns (`assistant/message`) and never sees a plugin's direct `llm.stream`. A `pending` row means the call is still in flight, or the process died mid-call: the row is written before the call and settled after it |
+| A configured `reasoningEffort` seems to do nothing | The route does not declare that level, so the call drops it rather than risk the core's `UNSUPPORTED_REASONING_EFFORT`. One warning names the route, the value and what the route does declare; `model_calls.effort` then reads empty for those attempts. The card offers exactly the levels the model advertises, so this normally only happens after editing the profile by hand or pointing the route at a different model |
 | Startup warnings never appear in the terminal | `dsh web` mounts no log exporter, so plugin log lines of any level go nowhere; the console exporter's default threshold would also drop warnings (warn is level 2, above info's 1). Mount a logger such as `dsh-logbook` or `dsh-boot-doctor` temporarily to read them |
 | Project scope looks wrong | Scope = basename of the session cwd's git top level (`git rev-parse --show-toplevel`), or of the cwd itself when git finds no work tree or cannot answer (not installed, a repo it refuses as unsafe). A `rev-parse` slower than 3 s leaves that one session on the cwd's own name. Two same-named checkouts share a scope by design; a linked worktree is scoped by its own directory, not the main checkout's; git resolves symlinks, so a checkout opened through a link named differently from its target gets the target's name. A name hypatia would rewrite is normalized first: a session at `/` is scoped `/`, commas become `_`, surrounding whitespace goes. Entries written before these fixes stay where they were stored: a subdirectory session's under that directory's name (`repo/src` wrote under `src` — the git root was never read), a session at `/` with no scope, `a,b` under both `a` and `b`, `foo,` under `foo` and global. Padded names were stored trimmed, which is what the query now asks for. Nothing migrates them; `knowledge-update --scopes` moves one entry and keeps its `created_at`. `hypatia scope list --count` (hypatia #30) shows every spelling in use and how many entries each holds |
 

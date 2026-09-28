@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   ADJUDICATION_MAX_TOKENS,
-  ADJUDICATION_REASONING_EFFORT,
+  budgetForEffort,
   buildTranscript,
   consolidationStart,
   createConsolidator,
@@ -14,6 +14,7 @@ import {
 } from '../src/consolidator.js'
 import { createWriter } from '../src/writer.js'
 import { TaskDeferredError } from '../src/queue.js'
+import { THINKING_OFF_EFFORT } from '../src/reasoning.js'
 import { makeModelLogDouble } from './model-log-double.mjs'
 
 const silentStatus = { warn: () => {}, info: () => {}, count: () => {}, error: () => {}, markConsolidated: () => {} }
@@ -232,7 +233,7 @@ test('onTurnEnd retains the checkpoint while consolidation is disabled', async (
 })
 
 /** Minimal doubles for a full `execute` run. */
-function makeExecuteHarness({ events, maxInputTokens, inherited = 0, modelLog, finishKind = 'stop', finishFailure, replyText, reasoningEfforts, models = [{ provider: 'p', model: 'm' }] }) {
+function makeExecuteHarness({ events, maxInputTokens, inherited = 0, modelLog, finishKind = 'stop', finishFailure, replyText, reasoningEfforts, usage, models = [{ provider: 'p', model: 'm' }] }) {
   const progressMap = new Map()
   const progress = {
     get: (k) => progressMap.get(k),
@@ -245,8 +246,9 @@ function makeExecuteHarness({ events, maxInputTokens, inherited = 0, modelLog, f
     async statementCreate(head, relation, tail) { written.statements.push([head, relation, tail]) },
     async search() { return [] },
   }
+  const warnings = []
   const status = {
-    info: () => {}, warn: () => {}, error: () => {},
+    info: () => {}, warn: (message) => warnings.push(message), error: () => {},
     count: () => {}, markConsolidated: () => {},
   }
   const prompts = []
@@ -266,6 +268,8 @@ function makeExecuteHarness({ events, maxInputTokens, inherited = 0, modelLog, f
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: payload }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: payload } }
+      // A route is not obliged to report usage; most doubles here do not.
+      if (usage !== undefined) yield { type: 'usage', usage }
       yield {
         type: 'finish',
         reason: finishFailure === undefined
@@ -305,7 +309,7 @@ function makeExecuteHarness({ events, maxInputTokens, inherited = 0, modelLog, f
     modelLog,
     projectFor: async () => 'demo',
   })
-  return { consolidator, progressMap, written, prompts, requests, enqueued }
+  return { consolidator, progressMap, written, prompts, requests, enqueued, warnings }
 }
 
 test('execute advances the watermark only over the span it actually consolidated', async () => {
@@ -458,6 +462,80 @@ test('a route that cannot stop thinking pays for it in the cap', async () => {
   assert.equal(h.requests[0].maxTokens, 2000 + THINKING_OUTPUT_ALLOWANCE,
     'thinking shares the cap, so a cap sized for the answer alone truncates the answer')
   assert.equal(outputBudget(2000, true), 2000, 'the allowance applies only where thinking may run')
+})
+
+test('a configured reasoning effort overrides the purpose policy and pays the allowance', async () => {
+  // The field's whole point: extraction normally asks for `off`, but a user who
+  // configured a real level gets that level — and the cap has to grow with it,
+  // because reasoning and the answer share one budget.
+  const events = [
+    ev('user/message', 0, { source: { kind: 'user' }, content: [{ type: 'text', text: 'do the thing' }] }),
+    ev('assistant/message', 1, { turn: 1, message: { content: [{ type: 'text', text: 'done' }] } }),
+  ]
+  const modelLog = makeModelLogDouble()
+  const h = makeExecuteHarness({
+    events, maxInputTokens: 10_000, modelLog,
+    reasoningEfforts: ['off', 'low', 'high'],
+    models: [{ provider: 'p', model: 'm', reasoningEffort: 'low' }],
+  })
+
+  await h.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 2, project: 'demo' })
+
+  assert.equal(h.requests[0].reasoningEffort, 'low')
+  assert.equal(h.requests[0].maxTokens, 2000 + THINKING_OUTPUT_ALLOWANCE)
+  assert.deepEqual(modelLog.attempts.map((a) => a.effort), ['low'],
+    'the record names the effort actually sent, not the configured one')
+  assert.deepEqual(h.warnings, [])
+})
+
+test('an effort a route does not declare is dropped, reported once, and the call still runs', async () => {
+  // Sending it would be a guaranteed `UNSUPPORTED_REASONING_EFFORT` before any
+  // provider I/O, which turns a profile typo into a task that retries and then
+  // fails permanently.
+  const events = [
+    ev('user/message', 0, { source: { kind: 'user' }, content: [{ type: 'text', text: 'do the thing' }] }),
+    ev('assistant/message', 1, { turn: 1, message: { content: [{ type: 'text', text: 'done' }] } }),
+  ]
+  const modelLog = makeModelLogDouble()
+  const h = makeExecuteHarness({
+    events, maxInputTokens: 10_000, modelLog,
+    reasoningEfforts: ['off', 'low'],
+    models: [{ provider: 'p', model: 'm', reasoningEffort: 'max' }],
+  })
+
+  await h.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 2, project: 'demo' })
+  await h.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 2, project: 'demo' })
+
+  assert.equal(h.requests[0].reasoningEffort, undefined, 'the rejected value is not sent')
+  assert.equal(h.requests[0].maxTokens, 2000 + THINKING_OUTPUT_ALLOWANCE,
+    'an omitted effort still leaves the adapter free to think')
+  assert.deepEqual(modelLog.attempts.map((a) => a.effort), [undefined, undefined])
+  assert.equal(h.warnings.length, 1, 'once per route and value, not once per attempt')
+  assert.match(h.warnings[0], /ignoring reasoningEffort "max"/)
+  assert.ok(h.written.knowledge.length > 0, 'the call itself was not blocked')
+})
+
+test('the token split of an attempt is recorded, including on a truncated one', async () => {
+  // `max-tokens` is the outcome these numbers exist to explain: without them,
+  // "the cap went to the answer or to the reasoning" is unanswerable.
+  const events = [
+    ev('user/message', 0, { source: { kind: 'user' }, content: [{ type: 'text', text: 'do the thing' }] }),
+    ev('assistant/message', 1, { turn: 1, message: { content: [{ type: 'text', text: 'done' }] } }),
+  ]
+  const modelLog = makeModelLogDouble()
+  const h = makeExecuteHarness({
+    events, maxInputTokens: 10_000, modelLog, finishKind: 'max-tokens',
+    usage: { inputTokens: 1200, outputTokens: 2000, reasoningTokens: 1800 },
+  })
+
+  await assert.rejects(
+    h.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 2, project: 'demo' }),
+    /output token cap/,
+  )
+
+  assert.deepEqual(modelLog.attempts.map((a) => [a.done[0], a.done[1], a.usage]), [
+    ['incomplete', 'max-tokens', { inputTokens: 1200, outputTokens: 2000, reasoningTokens: 1800 }],
+  ])
 })
 
 test('a retry asks for a single work unit', async () => {
@@ -631,10 +709,30 @@ test('adjudication asks the route to skip thinking when it advertises `off`', as
   const decision = await c.adjudicate(ADJUDICATE_UNIT, ADJUDICATE_CANDIDATES)
 
   assert.deepEqual(decision, { verdict: 'refines', target: 'wu-old' })
-  assert.equal(streams[0].reasoningEffort, ADJUDICATION_REASONING_EFFORT)
+  assert.equal(streams[0].reasoningEffort, THINKING_OFF_EFFORT)
   assert.equal(streams[0].maxTokens, ADJUDICATION_MAX_TOKENS)
   assert.ok(ADJUDICATION_MAX_TOKENS > 200, 'a route that cannot honour `off` still has to fit thinking')
   assert.deepEqual(modelLog.attempts.map((a) => [a.purpose, ...a.done]), [['memory-adjudication', 'ok', '']])
+})
+
+test('a configured effort on adjudication grows the cap that used to be fixed', async () => {
+  // The one path where the field can hurt: the verdict cap is sized for a
+  // verdict, and it is deliberately NOT the extraction cap. A user asking for
+  // thinking here must get the allowance, or reasoning eats the verdict — the
+  // exact failure the 200→1024 raise fixed for routes that cannot honour `off`.
+  const streams = []
+  const modelLog = makeModelLogDouble()
+  const c = makeAdjudicateHarness({
+    replyText: '{"verdict":"refines","target":"wu-old"}', modelLog, streams,
+    reasoningEfforts: ['off', 'high'],
+    models: [{ provider: 'p', model: 'm', reasoningEffort: 'high' }],
+  })
+
+  await c.adjudicate(ADJUDICATE_UNIT, ADJUDICATE_CANDIDATES)
+
+  assert.equal(streams[0].reasoningEffort, 'high')
+  assert.equal(streams[0].maxTokens, ADJUDICATION_MAX_TOKENS + THINKING_OUTPUT_ALLOWANCE)
+  assert.equal(modelLog.attempts[0].effort, 'high')
 })
 
 test('adjudication does not ask for an effort the route does not advertise', async () => {

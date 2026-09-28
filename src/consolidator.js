@@ -20,11 +20,12 @@ import { messageName, summaryName } from './writer.js'
 import { EMPTY_PROGRESS, advanceProgress } from './progress.js'
 import { TaskDeferredError } from './queue.js'
 import { NULL_MODEL_LOG } from './model-log.js'
+import { THINKING_OFF_EFFORT, createReasoningResolver } from './reasoning.js'
 
 export const PLUGIN_NAME = 'dsh-hypatia-auto-memory'
 
 /**
- * Output budget for one adjudication.
+ * Output budget for one adjudication, before any thinking allowance.
  *
  * It is not 200 — the value it carried for as long as the call existed — because
  * a thinking-enabled route spends the SAME cap on its reasoning and its answer.
@@ -32,21 +33,16 @@ export const PLUGIN_NAME = 'dsh-hypatia-auto-memory'
  * `llm-deepseek` profile default) and puts roughly half its output tokens into
  * reasoning, so a 200-token adjudication ended with `max-tokens` before the
  * verdict was ever emitted: every other work unit was silently stored with no
- * relationship at all. `ADJUDICATION_REASONING_EFFORT` below usually removes
- * the need for the headroom, but a route that cannot honour `off` — or a
- * provider that ignores the control — still has to fit thinking plus a verdict.
+ * relationship at all. The purpose policy usually removes the need for the
+ * headroom by asking for `off`, but a route that cannot honour `off`, a provider
+ * that ignores the control, or a user who configured a real effort still has to
+ * fit thinking plus a verdict — `budgetForEffort` adds the allowance for all
+ * three.
  */
 export const ADJUDICATION_MAX_TOKENS = 1024
 
 /**
- * What the adjudication call asks for on a route that advertises it. A verdict
- * is a six-way classification of two short texts: thinking there spends the
- * output budget and the latency for nothing.
- */
-export const ADJUDICATION_REASONING_EFFORT = 'off'
-
-/**
- * Answer-side headroom added when a route cannot be asked to stop thinking.
+ * Answer-side headroom added when a route may think.
  *
  * An extraction call asks for a summary plus a bounded number of work units —
  * measured on a live shelf, ~93 tokens for a summary and ~600–1200 for three
@@ -55,8 +51,9 @@ export const ADJUDICATION_REASONING_EFFORT = 'off'
  * 800–1400 tokens thinking before writing anything, then hit `max-tokens` with
  * the JSON half emitted (9.3 s, against 25 s for a completed run of the same
  * kind on that route). Asking for `off` is the fix; this allowance is what keeps
- * a route that cannot honour it — or a provider that ignores the control — from
- * truncating the answer instead of the reasoning.
+ * a route that cannot honour it — or a provider that ignores the control, or a
+ * user who configured a higher level on purpose — from truncating the answer
+ * instead of the reasoning.
  */
 export const THINKING_OUTPUT_ALLOWANCE = 4000
 
@@ -69,6 +66,22 @@ export const THINKING_OUTPUT_ALLOWANCE = 4000
  */
 export function outputBudget(configuredTokens, thinkingOff) {
   return thinkingOff ? configuredTokens : configuredTokens + THINKING_OUTPUT_ALLOWANCE
+}
+
+/**
+ * Output cap for one call, from the effort it will actually send.
+ *
+ * Only `off` frees the whole cap for the answer. Every other outcome shares it
+ * with reasoning — a `low`/`high`/`max` the user configured, and equally an
+ * omitted effort, which the adapter may resolve to a thinking level of its own
+ * (`llm-deepseek` resolves it to `high`).
+ *
+ * @param {number} baseTokens - cap for the answer alone.
+ * @param {string | undefined} effort - the value the call will send, if any.
+ * @returns {number} the cap to send.
+ */
+export function budgetForEffort(baseTokens, effort) {
+  return outputBudget(baseTokens, effort === THINKING_OFF_EFFORT)
 }
 
 /** Distinguishes permanent failures (no retry value) from transient ones. */
@@ -334,43 +347,17 @@ export function parseConsolidationOutput(raw, maxWorkUnits) {
  *   getConfig: () => any,
  *   status: import('./status.js').StatusLog,
  *   modelLog?: ReturnType<import('./model-log.js').createModelLog>,
+ *   reasoning?: ReturnType<import('./reasoning.js').createReasoningResolver>,
  *   projectFor: (session: any) => Promise<string>,
- * }} deps
+ * }} deps - `reasoning` is shared with the cascade (index.js) so both executors
+ * read one capability cache and warn once; absent, this instance builds its own.
  */
-export function createConsolidator({ queue, progress, sessions, llm, cli, writer, getConfig, status, modelLog = NULL_MODEL_LOG, projectFor }) {
+export function createConsolidator({ queue, progress, sessions, llm, cli, writer, getConfig, status, modelLog = NULL_MODEL_LOG, reasoning, projectFor }) {
   let warnedNoRoute = false
-
-  /**
-   * Whether a route may be asked for {@link ADJUDICATION_REASONING_EFFORT},
-   * memoized per route for this instance.
-   *
-   * The core rejects a request whose effort the model does not advertise
-   * (`UNSUPPORTED_REASONING_EFFORT`, `llm`'s `resolveCallWithInfo`), so the
-   * control only follows a positive capability answer. A route that cannot be
-   * inspected — an adapter that throws, or the `llm` double a unit test hands
-   * in — simply gets no effort, which is what every call did before this.
-   * Capability does not change while an instance lives; a profile reload
-   * rebuilds the instance and the cache with it.
-   *
-   * @param {{provider: string, model: string}} route
-   * @param {AbortSignal} signal - the same signal the call carries, so a
-   * lookup cannot outlive the timeout it is part of.
-   */
-  const thinkingOff = new Map()
-  async function canDisableThinking(route, signal) {
-    const key = `${route.provider}\0${route.model}`
-    if (thinkingOff.has(key)) return thinkingOff.get(key)
-    let supported = false
-    try {
-      const info = await llm.resolveModelInfo?.(route.provider, route.model, signal)
-      supported = Array.isArray(info?.reasoning?.efforts)
-        && info.reasoning.efforts.some((effort) => effort?.id === ADJUDICATION_REASONING_EFFORT)
-    } catch (error) {
-      status.warn(`reasoning capability lookup failed for ${key.replace('\0', '/')}: ${String(error)}`)
-    }
-    thinkingOff.set(key, supported)
-    return supported
-  }
+  // The capability cache is per instance and lives as long as it does; a profile
+  // reload rebuilds both. See reasoning.js for why an unverifiable or undeclared
+  // effort is dropped rather than sent.
+  const effortFor = reasoning ?? createReasoningResolver({ llm, status })
 
   /**
    * Turn-end trigger check. The turn threshold is a minimum interval between
@@ -493,16 +480,20 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
       listed,
     ].join('\n')
 
-    const record = modelLog.begin('memory-adjudication', route)
+    // Order matters: the controller exists first (the capability lookup carries
+    // its signal), then the effort is resolved, and only then is the attempt
+    // recorded — because what the record must name is the effort actually SENT,
+    // which is not the configured one when the route refuses it.
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), consolidation.timeoutMs)
+    const effort = await effortFor.effort(route, 'memory-adjudication', controller.signal)
+    const record = modelLog.begin('memory-adjudication', route, effort)
     let outcome = 'incomplete'
     let detail = ''
+    let assembler
     try {
-      // Asked for only when the route advertises it; see `canDisableThinking`.
-      const skipThinking = await canDisableThinking(route, controller.signal)
       const { createUserMessage, BlockAssembler } = await import('@deepseek-ai/dsh-llm')
-      const assembler = new BlockAssembler()
+      assembler = new BlockAssembler()
       for await (const chunk of llm.stream({
         provider: route.provider,
         model: route.model,
@@ -511,8 +502,8 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
           content: [{ type: 'text', text: instruction }],
           source: { kind: 'plugin', plugin: PLUGIN_NAME },
         })],
-        maxTokens: ADJUDICATION_MAX_TOKENS,
-        ...skipThinking ? { reasoningEffort: ADJUDICATION_REASONING_EFFORT } : {},
+        maxTokens: budgetForEffort(ADJUDICATION_MAX_TOKENS, effort),
+        ...effort === undefined ? {} : { reasoningEffort: effort },
         purpose: 'memory-adjudication',
         signal: controller.signal,
       })) {
@@ -545,7 +536,10 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
       throw error
     } finally {
       clearTimeout(timer)
-      void record.finish(outcome, detail)
+      // Usage is read here, not on the happy path: an attempt that ended in
+      // `max-tokens` is exactly the one whose reasoning/output split is worth
+      // recording, and it leaves through the throw above.
+      void record.finish(outcome, detail, assembler?.usage)
     }
   }
 
@@ -627,9 +621,13 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
     // watermark and the next trigger resumes from exactly there.
     const coveredToSeq = complete ? task.toSeq : lastSeq + 1
 
-    const attempt = modelLog.begin('memory-consolidation', route)
+    // Same order as the adjudication call: controller, then the effort, then the
+    // attempt record — the record names what was actually SENT, and a route that
+    // refuses the configured value is sent nothing.
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), consolidation.timeoutMs)
+    const effort = await effortFor.effort(route, 'memory-consolidation', controller.signal)
+    const attempt = modelLog.begin('memory-consolidation', route, effort)
     // A retry is normally recovering from a truncated reply, and the work units
     // are what make the reply long: one summary is ~93 tokens while three
     // structured units are several hundred. Asking for a single unit from the
@@ -638,31 +636,35 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
     const maxUnits = task.attempts > 0 ? 1 : consolidation.maxWorkUnitsPerRun
     let outcome = 'incomplete'
     let detail = ''
+    let usage
     let parsedOutput
     try {
       let assembled
+      let assembler
       try {
         const { createUserMessage, BlockAssembler } = await import('@deepseek-ai/dsh-llm')
-        const assembler = new BlockAssembler()
+        assembler = new BlockAssembler()
         const request = createUserMessage({
           content: [{ type: 'text', text: `${consolidationInstruction(maxUnits)}\n\n<transcript>\n${transcript}\n</transcript>` }],
           source: { kind: 'plugin', plugin: PLUGIN_NAME },
         })
-        // Thinking off, exactly as the adjudication call above: extraction is a
-        // mechanical transform into a fixed JSON shape, and a thinking route
-        // spends the SAME `maxOutputTokens` cap on its reasoning as on the JSON
-        // it is asked to emit. With the cap left to the route's default
-        // (`high`), a long span hits `max-tokens` with the JSON half-written —
-        // observed live: 9s to `max-tokens` where a completed run of the same
-        // kind took 25s, i.e. the budget went to reasoning, not to content.
-        const skipThinking = await canDisableThinking(route, controller.signal)
+        // The purpose policy asks for no reasoning here and the adjudication
+        // call above does the same: extraction is a mechanical transform into a
+        // fixed JSON shape, and a thinking route spends the SAME
+        // `maxOutputTokens` cap on its reasoning as on the JSON it is asked to
+        // emit. With the cap left to the route's default (`high`), a long span
+        // hits `max-tokens` with the JSON half-written — observed live: 9s to
+        // `max-tokens` where a completed run of the same kind took 25s, i.e. the
+        // budget went to reasoning, not to content. A configured
+        // `reasoningEffort` overrides that policy on purpose, and
+        // `budgetForEffort` pays for it out of the allowance.
         for await (const chunk of llm.stream({
           provider: route.provider,
           model: route.model,
           system: 'You produce strict JSON only. You never add prose around it.',
           messages: [request],
-          maxTokens: outputBudget(consolidation.maxOutputTokens, skipThinking),
-          ...skipThinking ? { reasoningEffort: ADJUDICATION_REASONING_EFFORT } : {},
+          maxTokens: budgetForEffort(consolidation.maxOutputTokens, effort),
+          ...effort === undefined ? {} : { reasoningEffort: effort },
           purpose: 'memory-consolidation',
           signal: controller.signal,
         })) {
@@ -670,6 +672,9 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
         }
         assembled = assembler
       } finally {
+        // Read even when the stream threw: `max-tokens` is the outcome whose
+        // reasoning/output split the record exists to explain.
+        usage = assembler?.usage
         clearTimeout(timer)
       }
       // The attempt stays open through parsing: a stream that ended with `stop`
@@ -724,7 +729,7 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
       }
       throw error
     } finally {
-      void attempt.finish(outcome, detail)
+      void attempt.finish(outcome, detail, usage)
     }
     const { summary, workUnits } = parsedOutput
 

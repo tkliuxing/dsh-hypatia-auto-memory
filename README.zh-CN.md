@@ -163,6 +163,13 @@ agent/created ──▶ rules/taboos inject()
   正是工作单元让回复变长。Cascade 是例外：它保留 thinking（它是在压缩十六条摘要，不是
   在填一个形状），并用同一份余量来支付。
 
+  路由上的 `reasoningEffort` 覆盖以上全部策略。把它设成该模型声明过的档位，这条路由上的
+  每次调用都会带上它，预算余量也随之生效（任何非 `off` 的档位都与正文共用上限）。档位
+  词表属于适配器自己（设置卡片只列出该模型声明的档位：`llm-deepseek` 上是
+  `off`/`low`/`high`/`max`）；而**路由没有声明的值会被丢弃并记一条警告**，不会发出去——
+  核心会在任何 provider I/O 之前拒绝未声明的档位，发出去等于把一处配置笔误变成反复重试
+  后永久失败的任务。留空即保持上面的按用途策略。
+
 - **Cascade** 把十六个未归档的 tier-N 摘要归档为一条 tier-(N+1) 条目，用 hypatia 自带
   的 `$not-summaried`（它对 `statement.tail` 做反连接并按 `created_at ASC` 排序，
   免费得到 FIFO 分批）。这就是协议的 log₁₆(n) 归档：每一层只压缩上一层已经蒸馏过的
@@ -282,6 +289,12 @@ agent/created ──▶ rules/taboos inject()
 在下一次重试，而不是同一次尝试内部。这是对原先「不管偏好、把所有已选路由轮流用完」的替换；
 改变偏好就重排列表，或直接用卡片上的 ↑/↓ 按钮。
 
+**每条路由还可以设置思考程度。** `reasoningEffort` 取一个适配器私有的档位——设置卡片只
+列出该模型声明的那些，`llm-deepseek` 上是 `off`/`low`/`high`/`max`。留空即保持上文
+*Consolidator* 里那套按用途策略；设了它就会覆盖该路由上所有调用的策略，输出上限也随之
+变大来支付这份思考。模型没有声明的档位会在调用时被丢弃并记一条警告，而不是发出去——核心
+会在任何 provider I/O 之前拒绝未声明的档位。
+
 ```yaml
 hypatia-auto-memory:
   enabled: true
@@ -298,6 +311,8 @@ hypatia-auto-memory:
     enabled: true
     # 优先级顺序：每次整合先用第一条路由，重试才降级到下一条（见上文说明）。
     models: []                   # 选择一条或多条 { provider, model } 路由
+    # 每条路由还可以带 `reasoningEffort: <档位>`——卡片只列出该模型声明的档位
+    # （deepseek 上是 off/low/high/max）。留空即保持按用途策略。
     maxInputTokens: 16000        # transcript 上限（chars/4 估算）
     maxOutputTokens: 2000
     timeoutMs: 120000
@@ -383,7 +398,10 @@ shelf 清单本来就不是配置，而设置域现在只投影插件的 Config 
    `~/.dsh/storages/hypatia_auto_memory_diag.json`（`tables.model_calls`，按 `seq`
    倒序，上限 100 条）。设置卡片里的列表不是答案：`consolidation.models` 是优先级顺序，
    同一个任务的几行会沿它往下走——第一次尝试是队首那条，重试是降级后的下一条，这也正是
-   确认「备选确实被用上了」的方式。`outcome` 为 `pending`（在飞行中，或进程中途死了）、
+   确认「备选确实被用上了」的方式。`effort` 是这次调用**实际发出**的档位——路由拒绝了
+   配置值时它就不是配置值；`outputTokens` / `reasoningTokens` 来自路由自己上报的用量，
+   它们才说明输出上限是被正文吃掉的还是被推理吃掉的（路由不上报用量时两者都是 0）。
+   `outcome` 为 `pending`（在飞行中，或进程中途死了）、
    `ok`（产出了可用结果）、`incomplete`（调用结束了但没产出——撞输出上限、被中止、回复
    解析不出来）或 `error`（调用本身抛错）；后两种都花掉了一次尝试且没有写入任何条目。
    `detail` 是 finish kind、固定标签或 provider 的错误消息，截断到 200 字符——绝不放消息
@@ -405,7 +423,7 @@ shelf 清单本来就不是配置，而设置域现在只投影插件的 Config 
 | 条目只在 turn 结束后才出现 | 设计如此：span 在 `turn/end` 切分，或当 turn 跑得比 `flushWindowMs` 久时在第一个 `step/end` 切分，所以条目不会缺它自己的工具结果 |
 | 有记录，没摘要 | `consolidation.models` 为空或无效——首次触发时告警一次 |
 | 有摘要但没有 `sum2-*` | 该项目里未归档的 tier-1 摘要还不足 `cascade.batchSize` 条 |
-| 工作单元没有关系 | shelf 没有嵌入模型（`similar` 失败），所有候选都超过了 `dedupMaxDistance`，或裁决调用本身没有产出裁决——`model_calls` 里表现为 `incomplete` / `max-tokens`，也就是开启了思考的路由把整个输出预算花在推理上、还没开始作答就撞了上限。现在裁决会先确认适配器声明了 `off`，再对该路由请求 `reasoningEffort: 'off'`；对无法接受它的路由则把上限提到 1024。自 hypatia #19 起，本地模型在 `~/.hypatia/models/<org>/<name>`（或 Hugging Face 缓存）里找，不再挨着 shelf：一个以前能回答 `similar`、现在说 `is not installed` 的 shelf，需要 `hypatia model install <model>`，或 `hypatia model register <model> <dir>` 指向它已有的文件 |
+| 工作单元没有关系 | shelf 没有嵌入模型（`similar` 失败），所有候选都超过了 `dedupMaxDistance`，或裁决调用本身没有产出裁决——`model_calls` 里表现为 `incomplete` / `max-tokens`，也就是开启了思考的路由把整个输出预算花在推理上、还没开始作答就撞了上限。现在裁决会先确认适配器声明了 `off`，再对该路由请求 `reasoningEffort: 'off'`；对无法接受它的路由则把上限提到 1024——而路由的 `reasoningEffort` 若指定了真实档位，拿到的就是这 1024 再加上思考余量。自 hypatia #19 起，本地模型在 `~/.hypatia/models/<org>/<name>`（或 Hugging Face 缓存）里找，不再挨着 shelf：一个以前能回答 `similar`、现在说 `is not installed` 的 shelf，需要 `hypatia model install <model>`，或 `hypatia model register <model> <dir>` 指向它已有的文件 |
 | `similar` 仍返回 `msg-*` 行 | 它们是在本插件让日志层退出嵌入之前写的，或由一个没有 `--no-embed` 的 hypatia 写的。在 shelf 的 `shelf.toml` 里用 `embedding.skip_tags = ["message"]` 加一次 `hypatia backfill` 一次性收回知识向量（比该 key 旧的二进制会拒绝打开 shelf，所以先升级所有共享它的二进制）。不要把 `session` 加进那个列表：`skip_tags` 匹配任何带该 tag 的条目，而人们写的关于会话的知识也带它——在试过的 shelf 上就有一条这样的条目丢了向量。插件自己的 `session-*` 节点很少，现在已逐次写入退出。三元组没有 tags 也没有 update 命令，所以之前写的 `belongTo` / `summary` 边保留向量 |
 | 任务处于 `deferred` 状态 | live store 和 persistence 都没能提供它的会话。不是错误：它不消耗尝试次数，一旦二者之一能提供就运行。通常 storage 立即回答——只有组合里没有 `sessionPersistence`，或它的读取失败（日志里找 `could not be read`）时才会持久化这个状态。被 deferred 的巩固任务会在下次启动时被 backfill 重新入队，所以它不必等会话被重新打开 |
 | 任务处于 `failed` 状态 | 一次 hypatia 或模型错误在 `maxAttempts` 之后持久化了。失败的 `log-message` 记录在下次启动时被修剪，因为水位会重新推导它们的范围；其它类型保留供检查——删掉一条好让下一个触发器重新创建它 |
@@ -417,7 +435,8 @@ shelf 清单本来就不是配置，而设置域现在只投影插件的 Config 
 | 手动乱改后出现重复 `msg-*` | 在 hypatia 里删掉该条目，并在 state domain 里把该会话的 `lastLoggedSeq` 调低——回填会重新创建它一次 |
 | Agent 自己的 `hypatia` 写入仍要审批 | `autoApprove: false`、命令在引号外有管道/重定向/串联、或首词不是 `binaries` 之一——按设计只回答纯调用。读取根本不会走到审批，所以那里没有要修的 |
 | Agent 拿到了一份教它手动记录消息的记忆协议 | 另一个插件先注册了 `hypatia-memory`（profile 里还有 `dsh-hypatia`），或磁盘上有 `hypatia-memory`——通常是 `hypatia skill install --agent codex` 写的 `~/.agents/skills/hypatia-memory`。Agent 预设会在比插件更近的一层加载磁盘技能，所以它在会话里胜出，尽管技能中心可能列出本插件。删掉启动告警指出的那份拷贝 |
-| 不知道实际用了哪个模型 | 列表是优先级顺序：一个任务的第一次尝试就是 `consolidation.models` 的队首，重试则是它降级到的那条。每次尝试都落在 `~/.dsh/storages/hypatia_auto_memory_diag.json`（`model_calls`），带 purpose、provider/model、outcome 和耗时——把同一个任务的几行按序读下来，就能确认备选确实被用上了。usage ledger 答不了这个问题——它只折算 Agent 的 turn（`assistant/message`），看不见插件直连的 `llm.stream`。`pending` 行表示调用仍在进行中，或进程在调用中途死了：记录在调用前先落盘、调用结束后回填 |
+| 不知道实际用了哪个模型 | 列表是优先级顺序：一个任务的第一次尝试就是 `consolidation.models` 的队首，重试则是它降级到的那条。每次尝试都落在 `~/.dsh/storages/hypatia_auto_memory_diag.json`（`model_calls`），带 purpose、provider/model、**实际发出的 `effort`**、outcome、耗时以及路由自己上报的 token 拆分——把同一个任务的几行按序读下来，就能确认备选确实被用上了，而 `effort` 是确认配置的思考档位真的生效了的依据。usage ledger 答不了这个问题——它只折算 Agent 的 turn（`assistant/message`），看不见插件直连的 `llm.stream`。`pending` 行表示调用仍在进行中，或进程在调用中途死了：记录在调用前先落盘、调用结束后回填 |
+| 配了 `reasoningEffort` 却像没生效 | 该路由没有声明这个档位，于是调用把它丢掉了，以免撞上核心的 `UNSUPPORTED_REASONING_EFFORT`。会有一条警告点名路由、值和该路由实际声明的档位，此后这些尝试的 `model_calls.effort` 是空的。卡片只提供模型声明的档位，所以这通常只发生在手改 profile、或把这条路由换成了别的模型之后 |
 | 启动告警从不出现在终端 | `dsh web` 不挂日志导出器，所以插件任何级别的日志行都没地方去；控制台导出器的默认阈值也会丢掉警告（warn 是 2 级，高于 info 的 1 级）。临时挂一个 logger，如 `dsh-logbook` 或 `dsh-boot-doctor` 来读它们 |
 | 项目 scope 看起来不对 | Scope = 会话 cwd 的 git 顶层目录的 basename（`git rev-parse --show-toplevel`）；git 找不到工作树或答不上（未安装、或某 repo 被判定不安全）时，则是 cwd 本身的 basename。一次慢于 3 秒的 `rev-parse` 会让那个会话留在 cwd 自己的名字上。两个同名 checkout 按设计共享 scope；linked worktree 按它自己的目录而非主 checkout 的目录定 scope；git 会解析符号链接，所以通过一个与目标不同名的链接打开的 checkout 会得到目标的名字。一个会被 hypatia 改写的名字会先归一化：位于 `/` 的会话定 scope 为 `/`，逗号变 `_`，去掉首尾空白。这些修复之前写的条目留在原处：子目录会话写在那个目录名下（`repo/src` 写在 `src` 下——git 根从未被读取）、位于 `/` 的会话无 scope、`a,b` 同时写在 `a` 和 `b` 下、`foo,` 写在 `foo` 和全局下。带空白的名字被去空白存储，这也正是查询现在所请求的。没有任何东西迁移它们；`knowledge-update --scopes` 可移动单条并保留其 `created_at`。`hypatia scope list --count`（hypatia #30）显示每种在用的拼写及其条目数 |
 

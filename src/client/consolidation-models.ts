@@ -11,10 +11,29 @@
 
 import type { ModelProviderGroup } from '@deepseek-ai/dsh-api-remotes/client'
 
+/**
+ * Adapter-owned reasoning metadata for one catalog model. Derived from the
+ * catalog type rather than re-declared, so a change upstream cannot drift from
+ * what the card renders: `efforts` is the vocabulary the adapter accepts, in its
+ * own preferred display order, and `defaultEffort` (optional) is what the
+ * adapter materializes when a caller omits an effort.
+ */
+export type ConsolidationModelReasoning = NonNullable<ModelProviderGroup['models'][number]['reasoning']>
+
 /** One exact provider/model route used for a consolidation attempt. */
 export interface ConsolidationModelRoute {
   provider: string
   model: string
+  /**
+   * Optional thinking level for this route. Absent means "follow the purpose
+   * policy", which is what every call did before the field existed: extraction
+   * and adjudication ask for no reasoning where the route allows it, and the
+   * archive call leaves the adapter's own default in place.
+   *
+   * The vocabulary is adapter-owned and opaque, so the card only ever offers
+   * what this model's catalog entry declares.
+   */
+  reasoningEffort?: string
 }
 
 /** One catalog route, including stored routes no longer advertised by an adapter. */
@@ -24,6 +43,20 @@ export interface ConsolidationModelCandidate extends ConsolidationModelRoute {
   modelName: string
   available: boolean
   selected: boolean
+  /** Absent for a route the catalog no longer advertises. */
+  reasoning?: ConsolidationModelReasoning
+}
+
+/** One row of the thinking-level picker. */
+export interface ReasoningEffortChoice {
+  /** Stable key for React and for tests. */
+  key: string
+  /** Value to store; `undefined` means "follow the purpose policy". */
+  effort: string | undefined
+  /** Adapter-provided display name; the card supplies its own label when absent. */
+  name?: string
+  /** The stored value is no longer declared by this route. */
+  stale?: boolean
 }
 
 /** One catalog response retained by the settings card. */
@@ -70,7 +103,8 @@ export function moveConsolidationModel(
 
 /**
  * The stored routes in their configured (priority) order, each resolved to its
- * catalog entry for a display name and an availability flag.
+ * catalog entry for a display name, an availability flag and the reasoning
+ * levels the route declares.
  *
  * `consolidationModelCandidates` already guarantees every stored route appears —
  * taken from the catalog, or appended as unavailable — so the candidate list is
@@ -78,6 +112,9 @@ export function moveConsolidationModel(
  * named by its raw ids and marked unavailable, because dropping it from the
  * priority list would hide a configured route from the only UI that can remove
  * it.
+ *
+ * `reasoningEffort` is taken from the STORED route, never from the catalog: the
+ * catalog describes what a model can do, the stored route is what the user chose.
  */
 export function orderedConsolidationModels(
   stored: readonly ConsolidationModelRoute[],
@@ -86,7 +123,7 @@ export function orderedConsolidationModels(
   const byKey = new Map(candidates.map(candidate => [candidate.key, candidate]))
   return stored.map((route) => {
     const key = consolidationModelKey(route)
-    return byKey.get(key) ?? {
+    const base = byKey.get(key) ?? {
       ...route,
       key,
       providerName: route.provider,
@@ -94,7 +131,50 @@ export function orderedConsolidationModels(
       available: false,
       selected: true,
     }
+    return { ...base, reasoningEffort: route.reasoningEffort }
   })
+}
+
+/**
+ * The thinking-level options for one route, in the order they are offered.
+ *
+ * Two rules, both about not inventing a vocabulary this plugin does not own:
+ *
+ * - The list comes from the route's own declared `efforts`, in the adapter's
+ *   preferred order, labelled with the adapter's own names. Nothing is
+ *   hard-coded — the ids are opaque, and a level one adapter accepts is not one
+ *   another does.
+ * - "Follow the purpose policy" (`undefined`) is always first and is what an
+ *   absent field stores. It is NOT the same as the adapter's `defaultEffort`:
+ *   omitting the field lets the plugin's own per-purpose policy apply, which for
+ *   extraction and adjudication means asking for no reasoning at all.
+ *
+ * A stored value the route no longer declares is appended and flagged rather
+ * than dropped, so the card can show what is actually configured instead of
+ * silently rewriting it — and so a route whose catalog entry disappeared still
+ * displays its setting.
+ *
+ * @param reasoning - The route's catalog metadata; absent when the catalog does
+ * not advertise the route, or the model declares no reasoning control.
+ * @param stored - The configured value, if any.
+ */
+export function reasoningEffortChoices(
+  reasoning: ConsolidationModelReasoning | undefined,
+  stored: string | undefined,
+): ReasoningEffortChoice[] {
+  const efforts = Array.isArray(reasoning?.efforts) ? reasoning.efforts : []
+  const choices: ReasoningEffortChoice[] = [{ key: 'purpose', effort: undefined }]
+  for (const effort of efforts) {
+    const id = typeof effort?.id === 'string' ? effort.id : ''
+    if (id === '') continue
+    const name = typeof effort.name === 'string' && effort.name !== '' ? effort.name : id
+    choices.push({ key: `effort:${id}`, effort: id, name })
+  }
+  const value = typeof stored === 'string' ? stored.trim() : ''
+  if (value !== '' && !efforts.some(effort => effort?.id === value)) {
+    choices.push({ key: `stale:${value}`, effort: value, stale: true })
+  }
+  return choices
 }
 
 /**
@@ -118,6 +198,10 @@ export function consolidationModelCandidates(
       modelName: model.name,
       available: true,
       selected: selected.has(key),
+      // The adapter-owned vocabulary this route accepts, straight from the
+      // catalog the card already loaded — no extra request, and no client-side
+      // guess at what "low" or "high" mean.
+      ...model.reasoning === undefined ? {} : { reasoning: model.reasoning },
     }
   }))
   for (const route of storedByKey.values()) {

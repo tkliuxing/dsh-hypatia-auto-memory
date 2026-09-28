@@ -21,8 +21,9 @@
 
 import { createHash } from 'node:crypto'
 
-import { PLUGIN_NAME, outputBudget } from './consolidator.js'
+import { PLUGIN_NAME, budgetForEffort } from './consolidator.js'
 import { NULL_MODEL_LOG } from './model-log.js'
+import { createReasoningResolver } from './reasoning.js'
 
 /** Tag marking the tier an entry belongs to. */
 export function levelTag(level) {
@@ -82,27 +83,35 @@ function archiveInstruction(level, count) {
  *   getConfig: () => any,
  *   status: import('./status.js').StatusLog,
  *   modelLog?: ReturnType<import('./model-log.js').createModelLog>,
- * }} deps
+ *   reasoning?: ReturnType<import('./reasoning.js').createReasoningResolver>,
+ * }} deps - `reasoning` is shared with the consolidator (index.js), so one
+ * capability cache and one set of warnings cover both executors.
  */
-export function createCascade({ cli, llm, selectRoute, getConfig, status, modelLog = NULL_MODEL_LOG }) {
+export function createCascade({ cli, llm, selectRoute, getConfig, status, modelLog = NULL_MODEL_LOG, reasoning }) {
+  const effortFor = reasoning ?? createReasoningResolver({ llm, status })
+
   /**
    * Ask the model to archive one batch.
+   *
+   * @param {string | undefined} effort - the resolved thinking level for this
+   * run, decided once in `execute` so every tier is archived the same way.
    * @returns {Promise<{title: string, summary: string} | undefined>}
    */
-  async function archiveBatch(level, rows, route, timeoutMs) {
+  async function archiveBatch(level, rows, route, timeoutMs, effort) {
     const body = rows.map((row, i) => {
       const data = typeof row?.content?.data === 'string' ? row.content.data : ''
       return `### ${i + 1}. ${row.name}\n${data}`
     }).join('\n\n')
 
-    const attempt = modelLog.begin('memory-cascade', route)
+    const attempt = modelLog.begin('memory-cascade', route, effort)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     let outcome = 'incomplete'
     let detail = ''
+    let assembler
     try {
       const { createUserMessage, BlockAssembler } = await import('@deepseek-ai/dsh-llm')
-      const assembler = new BlockAssembler()
+      assembler = new BlockAssembler()
       for await (const chunk of llm.stream({
         provider: route.provider,
         model: route.model,
@@ -111,14 +120,18 @@ export function createCascade({ cli, llm, selectRoute, getConfig, status, modelL
           content: [{ type: 'text', text: `${archiveInstruction(level, rows.length)}\n\n${body}` }],
           source: { kind: 'plugin', plugin: PLUGIN_NAME },
         })],
-        // Thinking stays ON here, unlike the extraction call: an archive is a
-        // semantic compression of sixteen summaries, not a mechanical transform
-        // into a fixed shape, and reasoning plausibly earns its cost. What it
-        // must not do is share a cap sized for the answer alone, so the budget
-        // carries the thinking allowance. (This call fails SOFT — a truncated
-        // archive just returns undefined and the tier is retried by the next
-        // batch — which is why the permanent-failure path never applied to it.)
-        maxTokens: outputBudget(getConfig().consolidation.maxOutputTokens, false),
+        // Thinking stays ON by default here, unlike the extraction call: an
+        // archive is a semantic compression of sixteen summaries, not a
+        // mechanical transform into a fixed shape, and reasoning plausibly earns
+        // its cost. So the purpose policy asks for nothing and leaves the
+        // adapter's own default in place — unless the route's configuration
+        // named a level, which `effortFor` resolved above. Either way the budget
+        // carries the thinking allowance unless the level is `off`. (This call
+        // fails SOFT — a truncated archive just returns undefined and the tier
+        // is retried by the next batch — which is why the permanent-failure path
+        // never applied to it.)
+        maxTokens: budgetForEffort(getConfig().consolidation.maxOutputTokens, effort),
+        ...effort === undefined ? {} : { reasoningEffort: effort },
         purpose: 'memory-cascade',
         signal: controller.signal,
       })) {
@@ -155,7 +168,9 @@ export function createCascade({ cli, llm, selectRoute, getConfig, status, modelL
       throw error
     } finally {
       clearTimeout(timer)
-      void attempt.finish(outcome, detail)
+      // Read even on a throw: a truncated archive is the case whose token split
+      // is worth having.
+      void attempt.finish(outcome, detail, assembler?.usage)
     }
   }
 
@@ -172,9 +187,11 @@ export function createCascade({ cli, llm, selectRoute, getConfig, status, modelL
     const batchSize = consolidation.cascade?.batchSize ?? 16
     // Same priority order as consolidation: the first attempt archives on the
     // preferred route, a retry degrades. The run picks once and archives every
-    // tier with that one choice.
+    // tier with that one choice — and resolves its thinking level once, the same
+    // way, so a multi-tier climb cannot change personality halfway.
     const route = selectRoute(consolidation.models, task.attempts)
     if (route === undefined) return
+    const effort = await effortFor.effort(route, 'memory-cascade')
 
     // A ceiling on tiers, not an expected depth: reaching tier 8 at 16:1 would
     // mean ~4 billion source entries. It exists so a malformed shelf cannot spin.
@@ -195,7 +212,7 @@ export function createCascade({ cli, llm, selectRoute, getConfig, status, modelL
 
       const existing = await cli.knowledgeGet(name)
       if (existing.found === false) {
-        const archived = await archiveBatch(level, rows, route, consolidation.timeoutMs)
+        const archived = await archiveBatch(level, rows, route, consolidation.timeoutMs, effort)
         if (archived === undefined) {
           status.warn(`cascade archive produced nothing usable at tier ${level}`)
           return
