@@ -87,7 +87,7 @@ session/disposed ──▶ final flush + consolidation, thresholds waived (DSH �
 collect fiber 拆除 ──▶ 对每个仍打开的会话做同样的收尾，并在队列停止前落盘；模型
                      调用留到下次启动完成（重启、配置变更重启，或崩溃：启动时的
                      consolidation backfill）
-agent/session-start ──▶ rules/taboos inject()
+agent/created ──▶ rules/taboos inject()
 ```
 
 - **传输**是一个私有的 `hypatia mcp` 进程：在 subprocess service 上通过 stdio 走

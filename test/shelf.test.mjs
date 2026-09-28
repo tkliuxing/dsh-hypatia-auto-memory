@@ -361,8 +361,15 @@ test('the shelf setting refuses blank or padded names at parse time', () => {
 
 function makeRecall({ shelf, preload = true, rows = [] }) {
   const injected = []
-  let onStart
-  const ctx = { on: (event, cb) => { if (event === 'agent/session-start') onStart = cb } }
+  const subscriptions = []
+  const listeners = new Map()
+  // Mirrors cordis: any event name is accepted, so a subscription to a name dsh
+  // does not emit records without warning. That silence is why the event name
+  // needs pinning twice — here through a recorded subscription, and at compile
+  // time in test/events.type-check.ts against the installed dsh's event map.
+  const ctx = {
+    on: (event, cb) => { subscriptions.push(event); listeners.set(event, cb) },
+  }
   const recall = createRecall({
     ctx,
     cli: { query: async () => rows },
@@ -372,7 +379,14 @@ function makeRecall({ shelf, preload = true, rows = [] }) {
     projectFor: async () => 'demo',
   })
   const agent = { session: {}, inject: (message) => injected.push(message) }
-  return { recall, agent, injected, start: () => onStart({ agent }) }
+  return {
+    recall,
+    agent,
+    injected,
+    subscriptions,
+    // dsh emits `agent/created` with this payload shape since v0.1.6.
+    start: () => listeners.get('agent/created')?.({ agent, source: 'startup' }),
+  }
 }
 
 const seedText = (message) => message.content.map((block) => block.text).join('')
@@ -382,6 +396,23 @@ test('the seed names a non-default shelf even with nothing to preload', async ()
   await recall.preloadRulesAndTaboos(agent)
   assert.equal(injected.length, 1)
   assert.match(seedText(injected[0]), /--shelf work/)
+})
+
+test('recall listens for the event dsh actually emits', () => {
+  const { subscriptions } = makeRecall({ shelf: DEFAULT_SHELF })
+  assert.ok(subscriptions.includes('agent/created'), `must subscribe to agent/created, got ${subscriptions.join(', ')}`)
+  // The retired name: dsh emitted it up to v0.1.5 and this plugin supports >=0.1.7,
+  // so a listener bound to it would never run and would report nothing.
+  assert.ok(!subscriptions.includes('agent/session-start'), 'agent/session-start was renamed upstream')
+})
+
+test('a session start injects the preloaded seed through the registered listener', async () => {
+  const rows = [{ name: 'no-main', content: { data: 'Never commit to main.' } }]
+  const { injected, start } = makeRecall({ shelf: DEFAULT_SHELF, rows })
+  start()
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(injected.length, 1, 'the preload is wired to the listener, not only exported')
+  assert.match(seedText(injected[0]), /no-main/)
 })
 
 test('the default shelf adds no line and no seed when there is nothing to load', async () => {

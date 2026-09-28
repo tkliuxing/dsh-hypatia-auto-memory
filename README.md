@@ -101,7 +101,7 @@ collect fiber dispose ──▶ the same flush for every session still open, per
                      before the queue stops; the model call finishes at the next start
                      (a restart, a config-change restart, or a crash: the startup
                      consolidation backfill)
-agent/session-start ──▶ rules/taboos inject()
+agent/created ──▶ rules/taboos inject()
 ```
 
 - **Transport** is a private `hypatia mcp` process: JSON-RPC over stdio on the

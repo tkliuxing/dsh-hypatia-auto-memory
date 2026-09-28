@@ -136,13 +136,24 @@ export function createRecall({ ctx, cli, shelf = DEFAULT_SHELF, getConfig, statu
     }))
   }
 
-  ctx.on('agent/session-start', (payload) => {
+  function preload(agent) {
     const config = getConfig()
     if (config.enabled === false || config.recall.enabled === false) return
-    void preloadRulesAndTaboos(payload.agent).catch((error) => {
+    void preloadRulesAndTaboos(agent).catch((error) => {
       status.warn(`rules preload failed: ${String(error)}`)
     })
-  })
+  }
+
+  // dsh renamed this event: it emitted `agent/session-start` up to v0.1.5, and
+  // `agent/created` from v0.1.6 on. The plugin supports >=0.1.7 only, so the old
+  // name never fires — and `ctx.on` accepts any string, so subscribing to a name
+  // dsh no longer emits fails silently. `test/events.type-check.ts` pins every
+  // event this plugin subscribes to against cordis's `Events` interface.
+  ctx.on('agent/created', ({ agent }) => { preload(agent) })
+
+  // An agent created before this fiber attached never emits again. Upstream
+  // plugins cover that window the same way, by seeding the live registry once.
+  for (const agent of (ctx.agents?.list?.() ?? [])) preload(agent)
 
   return { preloadRulesAndTaboos }
 }
