@@ -115,6 +115,12 @@ export const DEFAULTS = {
  * refused by the schema, so the Loader rejects such an edit before committing
  * it and the settings tab reports the refusal — the pre-0.1.7 write hook did
  * the same.
+ *
+ * **The array is a priority order, highest priority first**, not a set: the
+ * first attempt of a task takes the head and each retry degrades one entry down
+ * (see `selectConsolidationRoute` in consolidator.js). Nothing here expresses
+ * that — position does — so a reordering IS a behavior change, and the settings
+ * card is the only editor that lets a user set it.
  */
 const ConsolidationModelSchema = z.object({
   provider: z.string().pattern(/\S/),
@@ -218,9 +224,10 @@ export function snapshotConfig(config) {
  * Cross-field checks the schema cannot express. The schema already refuses a
  * blank route; what is left is a duplicate, which the Loader has no hook to
  * refuse (it validates fields, not the list as a whole). A duplicate route is
- * harmless beyond skewing the rotation, so the running side drops it and says
- * so. Blank names are still dropped here as a defence for values that bypassed
- * the schema.
+ * not harmless any more: with the list read as a priority order, a repeat both
+ * wastes a degradation step and claims a second priority slot for one route, so
+ * the running side drops it and says so. Blank names are still dropped here as a
+ * defence for values that bypassed the schema.
  *
  * @param {any} value - one plain config snapshot.
  * @param {(message: string) => void} warn - status logger.

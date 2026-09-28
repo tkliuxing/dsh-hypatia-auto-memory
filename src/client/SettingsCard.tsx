@@ -14,6 +14,8 @@ import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-
 import {
   consolidationModelCandidates,
   consolidationModelKey,
+  moveConsolidationModel,
+  orderedConsolidationModels,
   type ConsolidationModelCandidate,
   type ConsolidationModelRoute,
   type LoadConsolidationModelCatalog,
@@ -180,6 +182,13 @@ export function SettingsCard({ scope, loadModelCatalog, loadShelfInventory, t }:
     )
   }, [catalogGroups, consolidation.models])
 
+  // The draft's own order, NOT the catalog's: this list is what the Host reads
+  // as the priority order, so it has to show the stored array verbatim.
+  const selectedModels = useMemo(
+    () => orderedConsolidationModels(consolidation.models ?? [], candidates),
+    [consolidation.models, candidates],
+  )
+
   const toggleModel = useCallback((candidate: ConsolidationModelCandidate) => {
     if (disabled || saving) return
     setDraft((current) => {
@@ -190,6 +199,25 @@ export function SettingsCard({ scope, loadModelCatalog, loadShelfInventory, t }:
       const models = selected
         ? currentModels.filter(route => consolidationModelKey(route) !== key)
         : [...currentModels, { provider: candidate.provider, model: candidate.model }]
+      return {
+        ...current,
+        consolidation: { ...currentConsolidation, models },
+      }
+    })
+  }, [disabled, saving])
+
+  /**
+   * Reorder one entry of the priority list. A no-op move leaves the draft
+   * untouched (the mover returns the original array), so the "unsaved" badge
+   * does not light up for a click that changed nothing.
+   */
+  const moveModel = useCallback((from: number, to: number) => {
+    if (disabled || saving) return
+    setDraft((current) => {
+      const currentConsolidation = current.consolidation ?? DEFAULT_CONSOLIDATION
+      const currentModels = currentConsolidation.models ?? []
+      const models = moveConsolidationModel(currentModels, from, to)
+      if (models === currentModels) return current
       return {
         ...current,
         consolidation: { ...currentConsolidation, models },
@@ -411,21 +439,71 @@ export function SettingsCard({ scope, loadModelCatalog, loadShelfInventory, t }:
             ) : null}
             {catalogPartial ? <p className={css.notice}>{t('modelCatalogPartial')}</p> : null}
             {candidates.length > 0 ? (
-              <fieldset className={css.models}>
-                <legend>{t('selectedModels')}</legend>
-                {[...availableGroups].map(([provider, group]) => (
-                  <div key={provider} className={css.modelGroup}>
-                    <div className={css.providerName}>{group.providerName}</div>
-                    {group.candidates.map(renderCandidate)}
-                  </div>
-                ))}
-                {unavailable.length > 0 ? (
-                  <div className={css.modelGroup}>
-                    <div className={css.providerName}>{t('unavailableModels')}</div>
-                    {unavailable.map(renderCandidate)}
-                  </div>
-                ) : null}
-              </fieldset>
+              <>
+                <fieldset className={css.models}>
+                  <legend>{t('selectedModels')}</legend>
+                  {selectedModels.length === 0 ? (
+                    <p className={css.notice}>{t('selectedModelsEmpty')}</p>
+                  ) : selectedModels.map((candidate, index) => (
+                    <div key={candidate.key} className={css.selectedRow}>
+                      <span className={css.order}>{index + 1}</span>
+                      <span className={css.selectedText}>
+                        <span className={css.modelName}>{candidate.modelName}</span>
+                        <span className={css.route}>{`${candidate.providerName} · ${candidate.provider}/${candidate.model}`}</span>
+                      </span>
+                      {!candidate.available ? <span className={css.unavailable}>{t('modelUnavailable')}</span> : null}
+                      <span className={css.rowActions}>
+                        <button
+                          type="button"
+                          className={css.move}
+                          title={t('moveUp')}
+                          aria-label={`${t('moveUp')}: ${candidate.modelName}`}
+                          disabled={disabled || saving || index === 0}
+                          onClick={() => moveModel(index, index - 1)}
+                        >
+                          ↑
+                        </button>
+                        <button
+                          type="button"
+                          className={css.move}
+                          title={t('moveDown')}
+                          aria-label={`${t('moveDown')}: ${candidate.modelName}`}
+                          disabled={disabled || saving || index === selectedModels.length - 1}
+                          onClick={() => moveModel(index, index + 1)}
+                        >
+                          ↓
+                        </button>
+                        <button
+                          type="button"
+                          className={css.move}
+                          title={t('remove')}
+                          aria-label={`${t('remove')}: ${candidate.modelName}`}
+                          disabled={disabled || saving}
+                          onClick={() => toggleModel(candidate)}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    </div>
+                  ))}
+                </fieldset>
+
+                <fieldset className={css.models}>
+                  <legend>{t('availableModels')}</legend>
+                  {[...availableGroups].map(([provider, group]) => (
+                    <div key={provider} className={css.modelGroup}>
+                      <div className={css.providerName}>{group.providerName}</div>
+                      {group.candidates.map(renderCandidate)}
+                    </div>
+                  ))}
+                  {unavailable.length > 0 ? (
+                    <div className={css.modelGroup}>
+                      <div className={css.providerName}>{t('unavailableModels')}</div>
+                      {unavailable.map(renderCandidate)}
+                    </div>
+                  ) : null}
+                </fieldset>
+              </>
             ) : catalogStatus === 'ready' ? <p className={css.notice}>{t('modelCatalogEmpty')}</p> : null}
           </div>
 

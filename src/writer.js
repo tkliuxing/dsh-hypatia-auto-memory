@@ -109,7 +109,7 @@ export function summaryName(sessionId, fromSeq, toSeq) {
  * @param {ReturnType<import('./hypatia-client.js').createHypatiaClient>} cli
  * @param {{
  *   status: import('./status.js').StatusLog,
- *   adjudicate?: (unit: any, candidates: readonly any[]) => Promise<{verdict: string, target?: string} | undefined>,
+ *   adjudicate?: (unit: any, candidates: readonly any[], attempt?: number) => Promise<{verdict: string, target?: string} | undefined>,
  * }} deps - `adjudicate` decides how a new work unit relates to nearby ones.
  * It is injected rather than implemented here because it needs a model route,
  * which the writer has no business owning; absent it, a unit is stored with no
@@ -283,8 +283,12 @@ export function createWriter(cli, { status, adjudicate }) {
    * @param {{title: string, content: string, tags: string[], project: string,
    *          derivedFrom?: string, date: string, maxDistance?: number,
    *          candidateLimit?: number}} unit
+   * @param {{attempt?: number}} [options] - `attempt` is the consolidation run's
+   * attempt index, forwarded to `adjudicate` so its route follows the same
+   * priority level as the run that produced this unit. Absent means the run's
+   * first attempt.
    */
-  async function writeWorkUnit(unit) {
+  async function writeWorkUnit(unit, { attempt } = {}) {
     const slug = sanitizeSlug(unit.title)
     // Content-addressed rather than `wu-<date>-<slug>`, which failed in both
     // directions: two different units whose titles slugged alike on one day
@@ -307,7 +311,7 @@ export function createWriter(cli, { status, adjudicate }) {
       })
       if (candidates.length > 0 && adjudicate !== undefined) {
         try {
-          const decision = await adjudicate(unit, candidates)
+          const decision = await adjudicate(unit, candidates, attempt)
           if (decision !== undefined && Object.hasOwn(VERDICTS, decision.verdict)) {
             verdict = decision.verdict
             nearest = rowName(candidates.find((row) => rowName(row) === decision.target) ?? candidates[0])

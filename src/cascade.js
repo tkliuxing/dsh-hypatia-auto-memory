@@ -78,7 +78,7 @@ function archiveInstruction(level, count) {
  * @param {{
  *   cli: ReturnType<import('./hypatia-client.js').createHypatiaClient>,
  *   llm: any,
- *   selectRoute: (routes: any) => any,
+ *   selectRoute: (routes: any, attempt?: number) => any,
  *   getConfig: () => any,
  *   status: import('./status.js').StatusLog,
  *   modelLog?: ReturnType<import('./model-log.js').createModelLog>,
@@ -163,14 +163,17 @@ export function createCascade({ cli, llm, selectRoute, getConfig, status, modelL
    * Run the cascade for one project, from tier 2 upward, until a tier has fewer
    * than `batchSize` unarchived entries.
    *
-   * @param {{project: string}} task
+   * @param {{project: string, attempts?: number}} task
    */
   async function execute(task) {
     const config = getConfig()
     const consolidation = config.consolidation
     if (consolidation.cascade?.enabled === false) return
     const batchSize = consolidation.cascade?.batchSize ?? 16
-    const route = selectRoute(consolidation.models)
+    // Same priority order as consolidation: the first attempt archives on the
+    // preferred route, a retry degrades. The run picks once and archives every
+    // tier with that one choice.
+    const route = selectRoute(consolidation.models, task.attempts)
     if (route === undefined) return
 
     // A ceiling on tiers, not an expected depth: reaching tier 8 at 16:1 would

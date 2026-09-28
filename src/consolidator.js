@@ -81,17 +81,38 @@ export class PermanentConsolidationError extends Error {
 }
 
 /**
- * Choose one selected route per consolidation attempt in stable round-robin order.
- * Empty lists do not consume a turn, so adding the first route always uses it.
+ * Choose the route for ONE model attempt. `routes` is a priority order, not a
+ * rotation: the head is the preferred route, and the tail is what a failure
+ * degrades to.
+ *
+ * The attempt index is what carries the degradation. A task's first attempt is
+ * `attempts === 0` and therefore always takes the head; a queue retry
+ * re-enters with `attempts` incremented and steps one route further down.
+ * Nothing else is needed to make degradation work — no cursor, no success
+ * feedback — because a task that succeeded is never retried, so the next task
+ * starts at the head again by construction.
+ *
+ * Past the end of the list the LAST route is reused rather than wrapping to the
+ * head: a wrapped choice would send the retry back to the route that just
+ * failed, and reusing the deepest fallback is the only reading of the list that
+ * stays a priority order. The consequence is a real coupling — the usable chain
+ * is `min(queue.maxAttempts, routes.length)` long, since a task cannot outlive
+ * its attempts — and the README states it.
+ *
+ * Empty (or absent) lists answer `undefined`, which is the no-route path every
+ * caller already handles.
+ *
+ * @param {readonly {provider: string, model: string}[] | undefined} routes
+ *   Priority-ordered routes, highest priority first.
+ * @param {number} [attempt] - Zero-based attempt index within one task; the
+ *   value of `task.attempts` on the queue record. Unusable values (absent, NaN,
+ *   negative) read as the first attempt.
+ * @returns {{provider: string, model: string} | undefined}
  */
-export function createConsolidationRouteSelector() {
-  let next = 0
-  return (routes) => {
-    if (!Array.isArray(routes) || routes.length === 0) return undefined
-    const route = routes[next % routes.length]
-    next = (next + 1) % routes.length
-    return route
-  }
+export function selectConsolidationRoute(routes, attempt = 0) {
+  if (!Array.isArray(routes) || routes.length === 0) return undefined
+  const index = Number.isFinite(attempt) ? Math.trunc(attempt) : 0
+  return routes[Math.min(Math.max(0, index), routes.length - 1)]
 }
 
 /**
@@ -318,7 +339,6 @@ export function parseConsolidationOutput(raw, maxWorkUnits) {
  */
 export function createConsolidator({ queue, progress, sessions, llm, cli, writer, getConfig, status, modelLog = NULL_MODEL_LOG, projectFor }) {
   let warnedNoRoute = false
-  const selectRoute = createConsolidationRouteSelector()
 
   /**
    * Whether a route may be asked for {@link ADJUDICATION_REASONING_EFFORT},
@@ -436,13 +456,16 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
    *
    * @param {any} unit
    * @param {readonly any[]} candidates
+   * @param {number} [attempt] - The attempt index of the run that produced this
+   * unit, so adjudication degrades with the run that triggered it. A route that
+   * could not summarise is not asked to adjudicate either.
    * @returns {Promise<{verdict: string, target: string} | undefined>}
    */
-  async function adjudicate(unit, candidates) {
+  async function adjudicate(unit, candidates, attempt = 0) {
     const config = getConfig()
     const consolidation = config.consolidation
     if (consolidation.adjudicate === false) return undefined
-    const route = selectRoute(consolidation.models)
+    const route = selectConsolidationRoute(consolidation.models, attempt)
     if (route === undefined) return undefined
 
     const listed = candidates.map((row, i) => {
@@ -470,7 +493,7 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
       listed,
     ].join('\n')
 
-    const attempt = modelLog.begin('memory-adjudication', route)
+    const record = modelLog.begin('memory-adjudication', route)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), consolidation.timeoutMs)
     let outcome = 'incomplete'
@@ -522,7 +545,7 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
       throw error
     } finally {
       clearTimeout(timer)
-      void attempt.finish(outcome, detail)
+      void record.finish(outcome, detail)
     }
   }
 
@@ -563,7 +586,12 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
   async function execute(task) {
     const config = getConfig()
     const consolidation = config.consolidation
-    const route = selectRoute(consolidation.models)
+    // `task.attempts` IS the degradation: the first attempt takes the head of
+    // the priority list, and each queue retry steps one route further down (see
+    // `selectConsolidationRoute`). The attempt is also threaded into the
+    // adjudication below, so the whole run — summary and relationships alike —
+    // stays on the same priority level.
+    const route = selectConsolidationRoute(consolidation.models, task.attempts)
     if (route === undefined) {
       if (!warnedNoRoute) {
         warnedNoRoute = true
@@ -645,8 +673,8 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
         clearTimeout(timer)
       }
       // The attempt stays open through parsing: a stream that ended with `stop`
-      // but yields no usable summary is `incomplete`, not `ok` — the cursor was
-      // consumed, nothing was stored, and a table that said otherwise would
+      // but yields no usable summary is `incomplete`, not `ok` — the attempt was
+      // spent, nothing was stored, and a table that said otherwise would
       // send a reader looking for a summary that does not exist. The throws are
       // re-issued unchanged, so recording never changes which error the queue
       // sees.
@@ -735,7 +763,7 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
         project: task.project,
         derivedFrom: span,
         date,
-      })
+      }, { attempt: task.attempts })
       if (result.written) {
         status.info(`work unit stored: ${result.name}`)
       }
@@ -761,5 +789,16 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
     status.count('consolidations')
   }
 
-  return { onTurnEnd, onSessionEnd, adjudicate, selectRoute, execute, buildTranscript, parseConsolidationOutput }
+  return {
+    onTurnEnd,
+    onSessionEnd,
+    adjudicate,
+    // The pure priority selector, shared with the cascade: both executors hold
+    // their own `task.attempts`, so neither needs a place of its own in a
+    // rotation and there is no cross-executor state left to keep in step.
+    selectRoute: selectConsolidationRoute,
+    execute,
+    buildTranscript,
+    parseConsolidationOutput,
+  }
 }

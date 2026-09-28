@@ -192,6 +192,32 @@ test('writeWorkUnit ignores operational rows when looking for relatives', async 
   )
 })
 
+test('writeWorkUnit forwards the run\'s attempt to adjudication', async () => {
+  // Adjudication has to follow the priority level of the run that produced the
+  // unit: a route that could not summarise is not asked to judge either.
+  const stub = makeStub({
+    similarRows: [
+      { name: 'wu-old-belief-deadbeef', content: { tags: ['memory', 'work-unit'] }, distance: 0.05 },
+    ],
+  })
+  const attempts = []
+  const writer = createWriter(stub, {
+    status: makeStatus(),
+    adjudicate: async (_unit, _candidates, attempt) => {
+      attempts.push(attempt)
+      return undefined
+    },
+  })
+
+  // Distinct content on purpose: names are content-addressed, and a repeat of
+  // the same unit is stored as a duplicate without ever reaching adjudication.
+  await writer.writeWorkUnit(unitFixture({ content: 'first' }), { attempt: 2 })
+  await writer.writeWorkUnit(unitFixture({ content: 'second' }), {})
+  await writer.writeWorkUnit(unitFixture({ content: 'third' }))
+
+  assert.deepEqual(attempts, [2, undefined, undefined])
+})
+
 test('the candidate fetch excludes the operational layer in the query where the binary can', async () => {
   // hypatia #35 gave `similar` `--exclude-tags`: the layer is left out BEFORE
   // ranking, so the rows asked for are the rows wanted and nothing is fetched

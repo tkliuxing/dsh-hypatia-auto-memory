@@ -2,18 +2,20 @@
  * Durable, bounded record of the model attempts the background pipeline makes.
  *
  * Why this exists. The route one consolidation attempt runs on is chosen by a
- * process-local round-robin cursor (`createConsolidationRouteSelector`) and,
- * before this, was dropped the moment the call was made. "Which model actually
- * summarised that span?" was then unanswerable from outside the process: the
- * settings card shows the configured route LIST, the host logger goes to a
- * terminal that scrolls away, and the usage ledger only folds agent turns — it
- * cannot see a plugin's direct `llm.stream` call at all (see
- * `@linxin666/dsh-usage` `usage-service.ts`, which folds `assistant/message`).
+ * pure priority selector (`selectConsolidationRoute`) and, before this, was
+ * dropped the moment the call was made. "Which model actually summarised that
+ * span?" was then unanswerable from outside the process: the settings card shows
+ * the configured route LIST, the host logger goes to a terminal that scrolls
+ * away, and the usage ledger only folds agent turns — it cannot see a plugin's
+ * direct `llm.stream` call at all (see `@linxin666/dsh-usage`
+ * `usage-service.ts`, which folds `assistant/message`).
  *
  * The record is written at SELECTION time and updated when the attempt settles,
  * so a row left at `pending` is itself evidence: the process died, or the
- * attempt is still in flight. That distinguishes the three states the cursor
- * alone cannot — selected, completed, and consumed-but-produced-nothing.
+ * attempt is still in flight. That distinguishes the three states the choice
+ * alone cannot — selected, completed, and consumed-but-produced-nothing. It is
+ * also how degradation is observed: with a priority list, the rows of one task's
+ * retries name the chain it walked.
  *
  * It lives in its OWN storage domain rather than in the one holding watermarks
  * and queued tasks. In that domain a record failing its schema rejects the whole
@@ -38,7 +40,7 @@ export const MODEL_CALL_LIMIT = 100
  * - `pending`  — selected, not settled (in flight, or the process died).
  * - `ok`       — the call settled AND produced a usable result.
  * - `incomplete` — settled without one: output cap, abort, refusal, a reply
- *   that did not parse, or one that parsed into nothing usable. The cursor WAS
+ *   that did not parse, or one that parsed into nothing usable. The attempt WAS
  *   consumed and nothing was stored. This is a deliberate catch-all: from
  *   outside, every one of those looks the same, and a caller that reported `ok`
  *   for a stop that yielded no summary would make the table lie.

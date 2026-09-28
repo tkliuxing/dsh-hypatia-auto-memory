@@ -184,7 +184,7 @@ function applyCollect(ctx, configHandle, status) {
       tasks: shelfTable(openedState.tasks, shelf),
     }
     // Which model a background attempt ran on is otherwise unknowable from
-    // outside the process: the cursor that picks it is process-local, the host
+    // outside the process: the pick is made in-process at call time, the host
     // logger scrolls away, and the usage ledger cannot see plugin calls. Kept in
     // its own domain so a diagnostics row can never reject the open of the
     // watermarks (see model-log.js). Not shelf-scoped: the route list is config,
@@ -277,9 +277,9 @@ function applyCollect(ctx, configHandle, status) {
 
     const writer = createWriter(cli, {
       status,
-      adjudicate: (unit, candidates) => shared.consolidator === undefined
+      adjudicate: (unit, candidates, attempt) => shared.consolidator === undefined
         ? Promise.resolve(undefined)
-        : shared.consolidator.adjudicate(unit, candidates),
+        : shared.consolidator.adjudicate(unit, candidates, attempt),
     })
 
     const collector = createCollector({
@@ -502,9 +502,9 @@ function applyCollect(ctx, configHandle, status) {
           projectFor: collector.projectFor,
         })
         queue.registerExecutor('consolidate', invalidatingContent(consolidator.execute))
-        // Shares the consolidator's route cursor so every model attempt — span
-        // summary, adjudication, archive — rotates through the selected routes
-        // together rather than each keeping its own place in the rotation.
+        // The same priority selector the consolidator uses, but no shared
+        // state: each executor holds its own task's `attempts`, so an archive
+        // retry degrades down the same list the summary just degraded down.
         const cascade = createCascade({
           cli,
           llm: c.llm,

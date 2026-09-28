@@ -334,6 +334,64 @@
   background: var(--dsw-alias-bg-layer-4);
 }
 
+/* Flex, not a grid: the availability badge is absent on most rows, and a fixed
+   template would shift the action buttons by one column when it disappears. */
+.selectedRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border-radius: 6px;
+  padding: 6px;
+}
+
+.selectedRow:hover {
+  background: var(--dsw-alias-bg-layer-4);
+}
+
+.order {
+  min-width: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.selectedText {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.rowActions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.move {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.move:hover:not(:disabled) {
+  background: var(--dsw-alias-bg-layer-4);
+  color: var(--dsw-alias-label-primary);
+}
+
+.move:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
 .modelName,
 .route {
   display: block;

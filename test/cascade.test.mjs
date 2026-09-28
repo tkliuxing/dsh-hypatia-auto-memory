@@ -110,6 +110,43 @@ test('archiveName is derived from members, so a replay reproduces it', () => {
   assert.match(archiveName(2, members), /^sum2-[0-9a-f]{12}$/)
 })
 
+test('the cascade degrades down the priority list with its own attempt count', async () => {
+  // The archive is a separate queue task with its own retries, so it has to
+  // carry its own attempt index: a retry must reach the fallback route, and a
+  // first attempt must not be handed one.
+  const entriesByTag = { [levelTag(1)]: tierEntries(levelTag(1), 3, 'sum-s1') }
+  const seen = []
+  const routeFor = (routes, attempt) => {
+    seen.push(attempt)
+    return ROUTE
+  }
+  const cascade = createCascade({
+    cli: makeCli(entriesByTag), llm: makeLlm(['Storage rewrite']), selectRoute: routeFor,
+    getConfig: makeConfig({ batchSize: 3 }), status: silentStatus,
+  })
+
+  await cascade.execute({ project: 'demo', attempts: 1 })
+
+  assert.deepEqual(seen, [1])
+})
+
+test('a cascading run picks one route and archives every tier with it', async () => {
+  const entriesByTag = { [levelTag(1)]: tierEntries(levelTag(1), 9, 'sum-s1') }
+  const seen = []
+  const cascade = createCascade({
+    cli: makeCli(entriesByTag), llm: makeLlm(['Storage rewrite']),
+    selectRoute: (routes, attempt) => {
+      seen.push(attempt)
+      return ROUTE
+    },
+    getConfig: makeConfig({ batchSize: 3 }), status: silentStatus,
+  })
+
+  await cascade.execute({ project: 'demo', attempts: 0 })
+
+  assert.deepEqual(seen, [0], 'one selection for the whole climb')
+})
+
 test('a full batch archives one tier up and links every member', async () => {
   const entriesByTag = { [levelTag(1)]: tierEntries(levelTag(1), 3, 'sum-s1') }
   const cli = makeCli(entriesByTag)

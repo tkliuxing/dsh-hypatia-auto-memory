@@ -232,7 +232,7 @@ test('onTurnEnd retains the checkpoint while consolidation is disabled', async (
 })
 
 /** Minimal doubles for a full `execute` run. */
-function makeExecuteHarness({ events, maxInputTokens, inherited = 0, modelLog, finishKind = 'stop', finishFailure, replyText, reasoningEfforts }) {
+function makeExecuteHarness({ events, maxInputTokens, inherited = 0, modelLog, finishKind = 'stop', finishFailure, replyText, reasoningEfforts, models = [{ provider: 'p', model: 'm' }] }) {
   const progressMap = new Map()
   const progress = {
     get: (k) => progressMap.get(k),
@@ -292,7 +292,7 @@ function makeExecuteHarness({ events, maxInputTokens, inherited = 0, modelLog, f
       enabled: true,
       consolidation: {
         enabled: true,
-        models: [{ provider: 'p', model: 'm' }],
+        models,
         maxInputTokens,
         maxOutputTokens: 2000,
         timeoutMs: 30_000,
@@ -351,7 +351,7 @@ test('execute covers the whole span when it fits, and never ships raw secrets', 
 
 test('execute records the model attempt that produced the summary', async () => {
   // Without this row, "which model summarised that span" is unanswerable: the
-  // cursor that picked it lives only in this process.
+  // choice is made in-process and leaves no other trace.
   const events = [
     ev('user/message', 0, { source: { kind: 'user' }, content: [{ type: 'text', text: 'do the thing' }] }),
     ev('assistant/message', 1, { turn: 1, message: { content: [{ type: 'text', text: 'done' }] } }),
@@ -365,10 +365,35 @@ test('execute records the model attempt that produced the summary', async () => 
   ])
 })
 
+test('execute takes the head of the priority list, and a retry one route down', async () => {
+  // The priority order, end to end: a task's first attempt never spends the
+  // fallback, a retry does, and a fresh task starts at the head again — there is
+  // no cursor between tasks to keep in step.
+  const events = [
+    ev('user/message', 0, { source: { kind: 'user' }, content: [{ type: 'text', text: 'do the thing' }] }),
+    ev('assistant/message', 1, { turn: 1, message: { content: [{ type: 'text', text: 'done' }] } }),
+  ]
+  const models = [
+    { provider: 'preferred', model: 'first' },
+    { provider: 'backup', model: 'second' },
+  ]
+  const runOn = async (attempts) => {
+    const modelLog = makeModelLogDouble()
+    const h = makeExecuteHarness({ events, maxInputTokens: 10_000, modelLog, models })
+    await h.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 2, project: 'demo', attempts })
+    return modelLog.attempts.map((a) => a.route)
+  }
+
+  assert.deepEqual(await runOn(0), [{ provider: 'preferred', model: 'first' }], 'first attempt')
+  assert.deepEqual(await runOn(0), [{ provider: 'preferred', model: 'first' }], 'the next task, not the next route')
+  assert.deepEqual(await runOn(1), [{ provider: 'backup', model: 'second' }], 'first retry')
+  assert.deepEqual(await runOn(5), [{ provider: 'backup', model: 'second' }], 'past the end, the last route')
+})
+
 test('a model call that ends without usable output is recorded as incomplete', async () => {
-  // The output cap consumes the round-robin cursor and produces no summary, so
-  // without this row a truncated attempt would look from outside exactly like
-  // an attempt that never happened.
+  // The output cap spends the attempt and produces no summary, so without this
+  // row a truncated attempt would look from outside exactly like an attempt that
+  // never happened.
   const events = [
     ev('user/message', 0, { source: { kind: 'user' }, content: [{ type: 'text', text: 'do the thing' }] }),
     ev('assistant/message', 1, { turn: 1, message: { content: [{ type: 'text', text: 'done' }] } }),
@@ -501,6 +526,7 @@ test('a stop that parses into nothing is incomplete, and never quotes the reply'
 function makeAdjudicateHarness({
   replyText, finishKind = 'stop', throwError, modelLog,
   reasoningEfforts, resolveError, streams, resolveCalls, status = silentStatus,
+  models = [{ provider: 'p', model: 'm' }],
 }) {
   const llm = {
     async *stream(request) {
@@ -524,7 +550,7 @@ function makeAdjudicateHarness({
     getConfig: () => ({
       enabled: true,
       consolidation: {
-        enabled: true, adjudicate: true, models: [{ provider: 'p', model: 'm' }],
+        enabled: true, adjudicate: true, models,
         maxInputTokens: 1000, maxOutputTokens: 200, timeoutMs: 1000,
         checkEveryTurns: 5, minNewTokens: 100, maxWorkUnitsPerRun: 2,
       },
@@ -547,6 +573,25 @@ test('adjudication records the attempt and its route', async () => {
   assert.deepEqual(decision, { verdict: 'refines', target: 'wu-old' })
   assert.deepEqual(modelLog.attempts.map((a) => [a.purpose, a.route, ...a.done]), [
     ['memory-adjudication', { provider: 'p', model: 'm' }, 'ok', ''],
+  ])
+})
+
+test('adjudication follows the attempt of the run that produced the unit', async () => {
+  // A route that could not summarise must not be asked to adjudicate either:
+  // the run degraded to its fallback, and the relationship call goes with it.
+  const modelLog = makeModelLogDouble()
+  const models = [
+    { provider: 'preferred', model: 'first' },
+    { provider: 'backup', model: 'second' },
+  ]
+  const c = makeAdjudicateHarness({
+    replyText: '{"verdict":"refines","target":"wu-old"}', modelLog, models,
+  })
+
+  await c.adjudicate(ADJUDICATE_UNIT, ADJUDICATE_CANDIDATES, 1)
+
+  assert.deepEqual(modelLog.attempts.map((a) => [a.purpose, a.route]), [
+    ['memory-adjudication', { provider: 'backup', model: 'second' }],
   ])
 })
 
