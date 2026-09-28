@@ -53,6 +53,7 @@
     "@deepseek-ai/dsh": ">=0.1.7-rc.1",
     "@deepseek-ai/dsh-llm": "^0.1.7-rc.1",
     "@deepseek-ai/dsh-storage-domain": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.1.7-rc.1",
     "react": "^18.2.0"
   },
   "peerDependenciesMeta": {

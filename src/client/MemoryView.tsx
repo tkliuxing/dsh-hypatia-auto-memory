@@ -22,11 +22,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import {
+  SUMMARIZE_REASON,
+  canSummarize,
   consolidationGap,
   mergeMemory,
   type FetchMemory,
   type MemoryEntry,
   type MemoryPayload,
+  type SummarizeMemory,
+  type SummarizeResult,
 } from './memory-client'
 import { NS } from './locales'
 import css from './MemoryView.module.css'
@@ -39,7 +43,42 @@ export type MemoryViewProps = {
   /** The session this tab is bound to; supplied by the session-scoped slot. */
   sessionId: string
   fetch: FetchMemory
+  /** Queues an explicit consolidation of one session; never runs the model here. */
+  summarize: SummarizeMemory
 } & PropsLocale<typeof NS>
+
+/** One line of feedback from an explicit consolidation request. */
+type Notice = { kind: 'ok' | 'error'; text: string }
+
+/**
+ * Render the Host's answer to one request.
+ *
+ * "Nothing to do" and "already queued" are not failures and do not read as one:
+ * the request was answered truthfully. Only a refusal — the feature is off, the
+ * route is missing, the session is gone — is shown as an error.
+ */
+function noticeFor(result: SummarizeResult, t: MemoryViewProps['t']): Notice {
+  if (result.queued) {
+    return {
+      kind: 'ok',
+      text: t('memorySummarizeQueued', { from: String(result.fromSeq), to: String(result.toSeq) }),
+    }
+  }
+  switch (result.reason) {
+    case SUMMARIZE_REASON.empty:
+      return { kind: 'ok', text: t('memorySummarizeEmpty') }
+    case SUMMARIZE_REASON.busy:
+      return { kind: 'ok', text: t('memorySummarizeBusy') }
+    case SUMMARIZE_REASON.disabled:
+      return { kind: 'error', text: t('memorySummarizeDisabled') }
+    case SUMMARIZE_REASON.unavailable:
+      return { kind: 'error', text: t('memorySummarizeUnavailable') }
+    case SUMMARIZE_REASON.unknownSession:
+      return { kind: 'error', text: t('memorySummarizeUnknown') }
+    default:
+      return { kind: 'error', text: t('memorySummarizeUnknownReason', { reason: result.reason }) }
+  }
+}
 
 /** Local wall-clock stamp for the freshness line. */
 function formatTime(epochMs: number): string {
@@ -98,10 +137,14 @@ function Entry({ entry, badge, open, onToggle, labels, t }: {
   )
 }
 
-export function MemoryView({ sessionId, fetch, t }: MemoryViewProps) {
+export function MemoryView({ sessionId, fetch, summarize, t }: MemoryViewProps) {
   const [payload, setPayload] = useState<MemoryPayload | undefined>(undefined)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  /** True while the Host is being asked to queue a consolidation. */
+  const [summarizing, setSummarizing] = useState(false)
+  /** The last explicit request's answer, cleared when the session switches. */
+  const [notice, setNotice] = useState<Notice | undefined>(undefined)
   /**
    * The entries the reader opened, by name. Absent means closed, which is the
    * default: a toggle survives the poll that replaces the payload, and an entry
@@ -153,6 +196,7 @@ export function MemoryView({ sessionId, fetch, t }: MemoryViewProps) {
     setPayload(undefined)
     setOverrides({})
     setContentAt(undefined)
+    setNotice(undefined)
     setLoading(true)
     void load(true)
   }, [load, sessionId])
@@ -177,6 +221,37 @@ export function MemoryView({ sessionId, fetch, t }: MemoryViewProps) {
   const toggle = useCallback((name: string, open: boolean) => {
     setOverrides((current) => ({ ...current, [name]: !open }))
   }, [])
+
+  /**
+   * Ask the Host to consolidate this session now.
+   *
+   * Only queues: the summary is written in the background, so the answer says
+   * what was accepted rather than what was written. A queued request refreshes
+   * the status so the "behind" figure catches up with the next poll; the
+   * watermark watch above then re-reads the shelf when consolidation lands.
+   */
+  const onSummarize = useCallback(() => {
+    setSummarizing(true)
+    setNotice(undefined)
+    void (async () => {
+      try {
+        const result = await summarize(sessionId)
+        if (activeSession.current !== sessionId) return
+        setNotice(noticeFor(result, t))
+        if (result.queued) void load(false)
+      } catch (failure) {
+        if (activeSession.current !== sessionId) return
+        setNotice({
+          kind: 'error',
+          text: t('memorySummarizeFailed', {
+            message: failure instanceof Error ? failure.message : String(failure),
+          }),
+        })
+      } finally {
+        if (activeSession.current === sessionId) setSummarizing(false)
+      }
+    })()
+  }, [load, sessionId, summarize, t])
 
   const session = payload?.session
   const content = payload?.content
@@ -225,6 +300,10 @@ export function MemoryView({ sessionId, fetch, t }: MemoryViewProps) {
 
         {error !== '' ? <p className={css.error} role="status">{t('memoryLoadFailed', { message: error })}</p> : null}
 
+        {notice !== undefined
+          ? <p className={notice.kind === 'ok' ? css.notice : css.error} role="status">{notice.text}</p>
+          : null}
+
         {loading && payload === undefined
           ? <p className={css.status}>{t('memoryLoading')}</p>
           : session === undefined
@@ -249,6 +328,20 @@ export function MemoryView({ sessionId, fetch, t }: MemoryViewProps) {
                             ? t('memoryCaughtUp')
                             : t('memoryBehind', { behind: String(consolidationGap(session)) })}
                         </span>
+                        {/* Disabled rather than hidden once caught up: hiding it
+                            would make the user rediscover it the next time the
+                            session falls behind, which is exactly when they look
+                            for it. It sits on the row that states the gap, so it
+                            appears at the moment the gap does. */}
+                        <button
+                          type="button"
+                          className={css.summarize}
+                          disabled={summarizing || !canSummarize(session)}
+                          title={t('memorySummarizeHint')}
+                          onClick={onSummarize}
+                        >
+                          {summarizing ? t('memorySummarizing') : t('memorySummarize')}
+                        </button>
                       </dd>
                     </div>
                     <div className={css.row}>

@@ -1,6 +1,6 @@
 ---
 name: hypatia-memory
-description: Long-term memory for DSH via hypatia. Conversation logging and background consolidation run automatically; retrieval is yours to drive. Use when the task touches past decisions, project conventions, prior bugs, or anything the user expects you to already know — and whenever the user says "read hypatia", "查一下 hypatia", "记住", "忘记".
+description: Long-term memory for DSH via hypatia. Conversation logging and background consolidation run automatically; retrieval is yours to drive. Use when the task touches past decisions, project conventions, prior bugs, or anything the user expects you to already know — and whenever the user says "read hypatia", "查一下 hypatia", "记住", "忘记". Also use when the user explicitly asks to summarise or consolidate a session now ("整理一下这个会话", "summarise this session").
 user-invocable: false
 allowed-tools: Bash, Read, Grep, Glob
 ---
@@ -198,6 +198,39 @@ cascade-deleted; remove them with `hypatia statement-delete <head> <relation>
 <tail>` when they would otherwise dangle. Deleted memories stay deleted — the
 collector's watermark has already moved past them.
 
+## Manual consolidation on request
+
+The automatic layer cuts spans on turn and token thresholds. Those thresholds
+pace an ongoing conversation; they are not a promise about *when* a summary
+exists. When the user asks for one **now** — "summarise this session", "整理一下
+这个会话", "把这段对话总结一下" — there is an action for it:
+
+```
+hypatia_summarize                              # the session you are running in
+hypatia_summarize {"sessionId": "<session-id>"} # or one the user names
+```
+
+It enqueues the span that is currently unsummarised, for the plugin's own
+background writer, on its dedicated model route. It returns immediately, so tell
+the user it is **queued**, not that a summary exists; the Memory tab's
+summarisation row catches up on its next poll.
+
+- **Trigger only on an explicit request.** Never call it because the session
+  feels long, because a turn just ended, or because you judge a summary would be
+  useful. The premise of this plugin is that a model left to decide when to
+  write memory does not write it: on the manual protocol, one of fifteen measured
+  sessions followed it, and only because the user asked directly. A
+  self-initiated call is that same failure with an extra model call attached.
+- **Do not** write `sum-*` entries yourself, and **do not** run the cascade by
+  hand. The plugin's writer is idempotent by name and owns the watermark — the
+  session-log `seq` range, which you cannot see. A hand-written summary gets a
+  different name, so the automatic layer later writes its own over the same
+  messages and the shelf carries both; and a batch the plugin did not choose
+  leaves an archive entry with a partial member set.
+- **Say that the composer has a command.** `/hypatia-summarize` queues exactly
+  the same work from the UI, without a model turn and without spending this
+  session's context. For a user who just wants it done, that is the cheaper path.
+
 ## Known gaps in the automatic layer
 
 Say so plainly if a user's expectation depends on one of these:
@@ -207,7 +240,18 @@ Say so plainly if a user's expectation depends on one of these:
   unrelated topics summarises them together.
 - **No `session-<id>` node** unless the host produced a session title or a
   compaction summary to build it from.
-- **Summary names are mechanical** (`sum-<session>-<from>-<to>`), not descriptive.
-  The descriptive title is the first heading inside the entry.
+- **Summary names are mechanical** (`sum-<session>-<from>-<to>` at tier 1,
+  `sum<level>-<digest>` above it), not descriptive. The descriptive title is the
+  first heading inside the entry.
+- **The summary layer is a cascade, not a flat list.** `summary 1` entries each
+  condense a span of messages. Once `cascade.batchSize` of one tier (16 by
+  default) have no `summary` edge archiving them, they are condensed into one
+  entry a tier up, tagged `summary 2`, and so on; the plugin stops creating tiers
+  past `summary 8`, a ceiling rather than an expected depth. `sum` is the
+  operational prefix for that whole layer (alongside `msg-`, `session-` and
+  `hypatia-dream-run-`), which is why every exclusion list skips it. What makes
+  an entry a cascade *member* is not its name but the pair "tagged `summary <N>`
+  and carrying no incoming `summary` edge" — the plugin's batches come from
+  hypatia's `$not-summaried`, which anti-joins on the edge.
 - **Work-unit dedup is best-effort** and degrades to "no relationship" whenever
   the shelf has no embedding model.

@@ -101,6 +101,8 @@ collect fiber dispose ──▶ the same flush for every session still open, per
                      before the queue stops; the model call finishes at the next start
                      (a restart, a config-change restart, or a crash: the startup
                      consolidation backfill)
+explicit request ──▶ /hypatia-summarize (no model turn) | hypatia_summarize |
+                     the Memory tab button ──▶ the same consolidate task, thresholds waived
 agent/created ──▶ rules/taboos inject()
 ```
 
@@ -221,6 +223,34 @@ agent/created ──▶ rules/taboos inject()
   This is the protocol's log₁₆(n) archive: each tier compresses only material a
   previous tier already distilled.
 
+- **Consolidation can also be requested explicitly.** Three faces call one host
+  action: the slash command **`/hypatia-summarize`** (in the composer's `/` menu,
+  executed by the UI *without a model turn*), the **`hypatia_summarize`** tool
+  (the `hypatia-memory` skill's execution path, so the agent never hand-writes a
+  `sum-*` entry), and a **Summarise now** button on the Memory tab, which sits on
+  the row that reports how far behind the session is — the moment a reader wants
+  it. A request cuts the span `[lastConsolidatedSeq, min(seq, lastLoggedSeq))`
+  **at that moment** and queues the same `consolidate` task the automatic trigger
+  queues: same kind, same executor, same idempotent writer. `checkEveryTurns` and
+  `minNewTokens` are deliberately bypassed — they pace an ongoing conversation,
+  and an explicit request is the reason to cut now. Measured live, a session sat
+  151 logged events behind while the token floor had accumulated 645 of 3000, so
+  waiting for the gate is not an answer to accept. The config switches are *not*
+  bypassed, and a request is only a cut, never a freeze: events appended
+  afterwards wait for the next trigger as usual.
+
+  "Nothing left to summarise" and "this span is already queued" are reported as
+  such rather than queued again, so asking twice does not produce two summaries —
+  and because the writer is idempotent by name, even a race cannot. The button is
+  **disabled but kept in place** once the session is caught up: hiding it would
+  make the user rediscover it every time the session falls behind, which is
+  exactly when they look for it. It rides the Memory tab's own route family,
+  whose first **write** route (`POST /consolidate`) keeps all three
+  self-authentication checks the read routes use — loopback socket, loopback
+  `Host`, same-origin — and refuses anything but `POST`, so the write cannot be
+  triggered by a link or an image tag. Nothing on any of the three faces runs a
+  model call in the main session.
+
 - **Work units** are adjudicated, not guessed. Candidates come from `similar`
   (the only search that reports a distance), with the operational layer left
   out — in the query, by `--exclude-tags`, on a binary that has it (hypatia
@@ -325,7 +355,7 @@ agent/created ──▶ rules/taboos inject()
   verbatim, the reader just wrote them, and the agent is the right reader for
   them.
 
-  The data arrives over a session-scoped, read-only HTTP route this plugin
+  The data arrives over a session-scoped HTTP route family this plugin
   registers on the DSH web server, `/api/dsh-hypatia-auto-memory/session`: status
   from the in-memory state tables on every poll, the shelf content only when it
   can have changed (on open, on a session switch, on a manual refresh, and when
@@ -335,7 +365,10 @@ agent/created ──▶ rules/taboos inject()
   and 120 000 per response. JSE has no `ORDER BY`, so "newest" is decided only
   after reading every candidate; when a scan reaches its cap the counts become
   lower bounds, and the tab reports that response as truncated rather than
-  leaving a short list unexplained.
+  leaving a short list unexplained. The family's one **write** route,
+  `POST /consolidate`, is what the **Summarise now** button calls; it writes
+  nothing itself — it queues the same consolidation task the automatic trigger
+  queues (see *On-demand* above).
   Two channels were rejected on the way here. A **session projection** would be
   the best shape, but the event that would drive it cannot be written from
   outside this repository: `Session.append` offers no way to set the envelope's
@@ -650,7 +683,8 @@ dsh-hypatia-auto-memory/
 │   ├── cascade.js        # log₁₆(n) hierarchical summary archive
 │   ├── model-log.js      # bounded record of which model each attempt ran on
 │   ├── memory-status.js  # per-session fold of the two state tables (pure)
-│   ├── memory-api.js     # Memory tab + shelf listing: read-only route family
+│   ├── memory-api.js     # Memory tab + shelf listing; its one write route too
+│   ├── on-demand.js      # /hypatia-summarize + the hypatia_summarize tool
 │   ├── recall.js         # rules/taboos preload at session start
 │   ├── auto-approve.js   # approves the agent's own plain bash hypatia calls
 │   ├── skills.js         # bundled skill registration (never shadows another provider)

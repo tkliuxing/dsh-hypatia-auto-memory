@@ -10,9 +10,10 @@ import {
   outputBudget,
   parseConsolidationOutput,
   PermanentConsolidationError,
+  SUMMARIZE_REASON,
   THINKING_OUTPUT_ALLOWANCE,
 } from '../src/consolidator.js'
-import { createWriter } from '../src/writer.js'
+import { createWriter, summaryName } from '../src/writer.js'
 import { TaskDeferredError } from '../src/queue.js'
 import { THINKING_OFF_EFFORT } from '../src/reasoning.js'
 import { makeModelLogDouble } from './model-log-double.mjs'
@@ -859,4 +860,165 @@ test('execute defers, rather than fails, when the session is not loaded', async 
     c.execute({ sessionId: 's9', fromSeq: 0, toSeq: 5, project: 'demo' }),
     (error) => error instanceof TaskDeferredError && error.deferred === true,
   )
+})
+
+/* --------------------------------------------- explicit consolidation ------ */
+
+/**
+ * Doubles for `consolidateNow`: a progress row, a resolvable session, an
+ * enqueue spy, and optionally a task already sitting in the queue's table.
+ *
+ * The config deliberately carries very high thresholds. An explicit request is
+ * supposed to ignore them, so a test that passed with them low would prove
+ * nothing.
+ */
+function makeOnDemandHarness({
+  progress: row = { lastLoggedSeq: 10, lastConsolidatedSeq: 2, lastCheckTurn: 0, pendingTokens: 0 },
+  session = { seq: 10, inheritedEventCount: 0 },
+  enabled = true,
+  consolidationEnabled = true,
+  resolvable = true,
+  existing: seed,
+} = {}) {
+  const enqueued = []
+  const warnings = []
+  let existing = seed
+  const consolidator = createConsolidator({
+    queue: {
+      async enqueue(task) { enqueued.push(task) },
+      peek: () => existing,
+    },
+    progress: { get: () => row },
+    sessions: { get: async () => (resolvable ? session : undefined) },
+    llm: {},
+    cli: {},
+    writer: {},
+    getConfig: () => ({
+      enabled,
+      consolidation: {
+        enabled: consolidationEnabled,
+        checkEveryTurns: 500,
+        minNewTokens: 5_000_000,
+        models: [{ provider: 'p', model: 'm' }],
+      },
+    }),
+    status: { warn: (message) => warnings.push(message), info: () => {}, count: () => {}, error: () => {}, markConsolidated: () => {} },
+    projectFor: async () => 'demo',
+  })
+  return { consolidator, enqueued, warnings, setExisting: (record) => { existing = record } }
+}
+
+test('consolidateNow queues the unconsolidated span, thresholds aside', async () => {
+  const h = makeOnDemandHarness()
+  const result = await h.consolidator.consolidateNow('s1')
+
+  assert.deepEqual(result, { sessionId: 's1', queued: true, reason: '', fromSeq: 2, toSeq: 10 })
+  assert.deepEqual(h.enqueued, [{
+    kind: 'consolidate',
+    sessionId: 's1',
+    fromSeq: 2,
+    toSeq: 10,
+    project: 'demo',
+    immediate: true,
+  }])
+})
+
+test('consolidateNow and onSessionEnd cut the same span through the same code', async () => {
+  // Criterion 4 of the issue: one action, not three implementations. Both faces
+  // differ only in whether the session is ending, so their queued task — kind,
+  // range, project, immediacy — must be identical for identical state.
+  const session = { seq: 40, inheritedEventCount: 6 }
+  const row = { lastLoggedSeq: 30, lastConsolidatedSeq: 3, lastCheckTurn: 0, pendingTokens: 0 }
+  const requested = makeOnDemandHarness({ progress: row, session })
+  const ending = makeOnDemandHarness({ progress: row, session })
+
+  const result = await requested.consolidator.consolidateNow('s1')
+  const ended = await ending.consolidator.onSessionEnd('s1', session)
+
+  assert.equal(ended, true)
+  assert.deepEqual(requested.enqueued, ending.enqueued)
+  assert.deepEqual([result.fromSeq, result.toSeq], [6, 30], 'the fork prefix still bounds the start')
+})
+
+test('consolidateNow respects the switches an explicit request cannot override', async () => {
+  const off = makeOnDemandHarness({ consolidationEnabled: false })
+  assert.deepEqual(await off.consolidator.consolidateNow('s1'), {
+    sessionId: 's1', queued: false, reason: SUMMARIZE_REASON.Disabled, fromSeq: 0, toSeq: 0,
+  })
+  assert.equal(off.enqueued.length, 0)
+
+  const pluginOff = makeOnDemandHarness({ enabled: false })
+  assert.equal((await pluginOff.consolidator.consolidateNow('s1')).reason, SUMMARIZE_REASON.Disabled)
+  assert.equal(pluginOff.enqueued.length, 0)
+})
+
+test('consolidateNow reports an empty span instead of queueing an empty task', async () => {
+  const h = makeOnDemandHarness({ progress: { lastLoggedSeq: 10, lastConsolidatedSeq: 10 } })
+  const result = await h.consolidator.consolidateNow('s1')
+
+  assert.deepEqual([result.queued, result.reason, result.fromSeq, result.toSeq], [false, SUMMARIZE_REASON.Empty, 10, 10])
+  assert.equal(h.enqueued.length, 0, 'a settled session produces no task')
+})
+
+test('a request whose span is already queued is reported as busy, not queued twice', async () => {
+  // The second call must not add a second summary. Reporting `busy` rather than
+  // enqueueing an identical range is what makes a double click free.
+  const h = makeOnDemandHarness({ existing: { kind: 'consolidate', status: 'running', fromSeq: 2, toSeq: 10 } })
+  const result = await h.consolidator.consolidateNow('s1')
+
+  assert.deepEqual([result.queued, result.reason], [false, SUMMARIZE_REASON.Busy])
+  assert.equal(h.enqueued.length, 0)
+})
+
+test('a queued task that does not reach the log does not swallow the new events', async () => {
+  // `busy` is only honest when the accepted task already covers the request.
+  // Falling through here matters: the queue widens the record and re-runs the
+  // uncovered tail, so nothing logged since is lost.
+  const h = makeOnDemandHarness({ existing: { kind: 'consolidate', status: 'pending', fromSeq: 0, toSeq: 5 } })
+  const result = await h.consolidator.consolidateNow('s1')
+
+  assert.equal(result.queued, true)
+  assert.equal(h.enqueued.length, 1)
+})
+
+test('a failed task does not block an explicit retry', async () => {
+  const h = makeOnDemandHarness({ existing: { kind: 'consolidate', status: 'failed', fromSeq: 2, toSeq: 10 } })
+  assert.equal((await h.consolidator.consolidateNow('s1')).queued, true)
+  assert.equal(h.enqueued.length, 1)
+})
+
+test('a deferred task is re-enqueued, which is what schedules it again', async () => {
+  // A deferred record waits for `session/created`; the session lookup above
+  // just proved the session is available, so reporting `busy` here would strand
+  // the range. Enqueueing schedules the record immediately.
+  const h = makeOnDemandHarness({ existing: { kind: 'consolidate', status: 'deferred', fromSeq: 2, toSeq: 10 } })
+  assert.equal((await h.consolidator.consolidateNow('s1')).queued, true)
+  assert.equal(h.enqueued.length, 1)
+})
+
+test('a repeated request cannot produce a second summary', async () => {
+  // The queued range is what names the entry (`summaryName`), and the writer is
+  // get-before-create on that name — so even a re-run of the same span stores
+  // one summary. What the explicit path adds is that the second request is not
+  // even queued.
+  const h = makeOnDemandHarness()
+  const first = await h.consolidator.consolidateNow('s1')
+  assert.equal(first.queued, true)
+  assert.equal(summaryName('s1', first.fromSeq, first.toSeq), 'sum-s1-2-10')
+
+  // The accepted task now covers the span the second request would ask for.
+  h.setExisting({ kind: 'consolidate', status: 'pending', fromSeq: first.fromSeq, toSeq: first.toSeq })
+  const second = await h.consolidator.consolidateNow('s1')
+
+  assert.deepEqual([second.queued, second.reason], [false, SUMMARIZE_REASON.Busy])
+  assert.equal(h.enqueued.length, 1, 'one span, one task')
+})
+
+test('consolidateNow refuses a session it cannot resolve instead of guessing', async () => {
+  const h = makeOnDemandHarness({ resolvable: false })
+  const result = await h.consolidator.consolidateNow('ghost')
+
+  assert.deepEqual([result.queued, result.reason], [false, SUMMARIZE_REASON.Unknown])
+  assert.equal(h.enqueued.length, 0)
+  assert.match(h.warnings[0], /ghost/)
 })

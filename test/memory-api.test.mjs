@@ -470,6 +470,114 @@ test('the caps are the ones the route documents', async () => {
   assert.ok(CONTENT_BUDGET_CHARS > BODY_MAX_CHARS)
 })
 
+/* ------------------------------------------------- explicit consolidation -- */
+
+test('an explicit consolidation POST queues through the one host action', async () => {
+  const cli = makeCli({})
+  const asked = []
+  const api = createMemoryApi({
+    cli,
+    read: makeRead(),
+    status: makeStatus(),
+    summarize: async (sessionId) => {
+      asked.push(sessionId)
+      return { sessionId, queued: true, reason: '', fromSeq: 12, toSeq: 40 }
+    },
+  })
+  const answer = await call(api, {
+    url: `${MEMORY_API_PREFIX}/consolidate?session=${SESSION}`,
+    method: 'POST',
+    origin: 'http://127.0.0.1:3080',
+  })
+
+  assert.equal(answer.status, 200)
+  assert.deepEqual(asked, [SESSION])
+  assert.deepEqual(answer.body, { sessionId: SESSION, queued: true, reason: '', fromSeq: 12, toSeq: 40 })
+  assert.equal(cli.queries.length, 0, 'queueing reads no shelf')
+})
+
+test('an outcome the action produced is data, not an HTTP error', async () => {
+  // "Caught up" and "already queued" are truthful answers. A 4xx would turn
+  // them into an error banner in the tab, which is a different claim.
+  const api = createMemoryApi({
+    cli: makeCli({}),
+    read: makeRead(),
+    status: makeStatus(),
+    summarize: async (sessionId) => ({ sessionId, queued: false, reason: 'empty', fromSeq: 40, toSeq: 40 }),
+  })
+  const answer = await call(api, {
+    url: `${MEMORY_API_PREFIX}/consolidate?session=${SESSION}`,
+    method: 'POST',
+    origin: 'http://127.0.0.1:3080',
+  })
+  assert.equal(answer.status, 200)
+  assert.equal(answer.body.reason, 'empty')
+})
+
+test('the write route is POST-only, session-scoped and never cross-origin', async () => {
+  const asked = []
+  const cli = makeCli({})
+  const api = createMemoryApi({
+    cli,
+    read: makeRead(),
+    status: makeStatus(),
+    summarize: async (sessionId) => {
+      asked.push(sessionId)
+      return { sessionId, queued: true, reason: '', fromSeq: 0, toSeq: 1 }
+    },
+  })
+  const trusted = { origin: 'http://127.0.0.1:3080' }
+
+  assert.equal((await call(api, { url: `${MEMORY_API_PREFIX}/consolidate?session=${SESSION}`, ...trusted })).status, 405)
+  assert.equal((await call(api, { url: `${MEMORY_API_PREFIX}/consolidate`, method: 'POST', ...trusted })).status, 400)
+  assert.equal((await call(api, { url: `${MEMORY_API_PREFIX}/consolidate?session=%25`, method: 'POST', ...trusted })).status, 400)
+  // The same three self-authentication checks as the read routes: a cross-origin
+  // POST (what a hostile page could send) and a non-loopback peer are refused.
+  assert.equal((await call(api, {
+    url: `${MEMORY_API_PREFIX}/consolidate?session=${SESSION}`,
+    method: 'POST',
+    origin: 'https://evil.example',
+    site: 'cross-site',
+  })).status, 403)
+  assert.equal((await call(api, {
+    url: `${MEMORY_API_PREFIX}/consolidate?session=${SESSION}`,
+    method: 'POST',
+    origin: 'http://127.0.0.1:3080',
+    address: '10.0.0.5',
+  })).status, 403)
+  assert.deepEqual(asked, [], 'nothing reached the action')
+  assert.equal(cli.queries.length, 0)
+})
+
+test('a composition without a consolidator says so instead of pretending to queue', async () => {
+  const api = createMemoryApi({ cli: makeCli({}), read: makeRead(), status: makeStatus() })
+  const answer = await call(api, {
+    url: `${MEMORY_API_PREFIX}/consolidate?session=${SESSION}`,
+    method: 'POST',
+    origin: 'http://127.0.0.1:3080',
+  })
+  assert.equal(answer.status, 503)
+  assert.match(answer.body.error, /not available/)
+})
+
+test('a failing action is a 500 with the reason recorded', async () => {
+  const status = makeStatus()
+  const api = createMemoryApi({
+    cli: makeCli({}),
+    read: makeRead(),
+    status,
+    summarize: async () => { throw new Error('git is not installed') },
+  })
+  const answer = await call(api, {
+    url: `${MEMORY_API_PREFIX}/consolidate?session=${SESSION}`,
+    method: 'POST',
+    origin: 'http://127.0.0.1:3080',
+  })
+  assert.equal(answer.status, 500)
+  assert.equal(answer.body.error, 'git is not installed')
+  assert.equal(status.lines.filter(([level]) => level === 'warn').length, 1)
+})
+
 /* ---------------------------------------------------------------- shelves -- */
 
 test('the shelves route serves the listing and caches it for the TTL', async () => {

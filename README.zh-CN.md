@@ -87,6 +87,8 @@ session/disposed ──▶ final flush + consolidation, thresholds waived (DSH �
 collect fiber 拆除 ──▶ 对每个仍打开的会话做同样的收尾，并在队列停止前落盘；模型
                      调用留到下次启动完成（重启、配置变更重启，或崩溃：启动时的
                      consolidation backfill）
+显式请求 ──▶ /hypatia-summarize（不过模型）| hypatia_summarize | 记忆标签页按钮
+                     ──▶ 同一个 consolidate 任务，但跳过阈值
 agent/created ──▶ rules/taboos inject()
 ```
 
@@ -175,6 +177,25 @@ agent/created ──▶ rules/taboos inject()
   免费得到 FIFO 分批）。这就是协议的 log₁₆(n) 归档：每一层只压缩上一层已经蒸馏过的
   内容。
 
+- **也可以显式要求立刻整合。** 三个面对应同一个 host 侧动作：斜杠命令
+  **`/hypatia-summarize`**（在 composer 的 `/` 菜单里，由 UI 执行、**不过模型**）、工具
+  **`hypatia_summarize`**（`hypatia-memory` 技能的执行路径，Agent 因此不会自己手写
+  `sum-*` 条目），以及记忆标签页上的**「立即整理」按钮**——它就在报告「落后多少」的那
+  一行上，正是读者需要它的时刻。一次请求按**触发那一刻**的水位切出
+  `[lastConsolidatedSeq, min(seq, lastLoggedSeq))`，入队与自动触发**完全相同**的
+  `consolidate` 任务：同一种 kind、同一个执行器、同一个幂等写手。`checkEveryTurns` 与
+  `minNewTokens` 被刻意绕过——它们用来给进行中的对话定节奏，而显式请求本身就是「现在
+  就切」的理由。实测中一个会话落后 151 个事件，而门槛只累计到 3000 中的 645，所以
+  「等闸门开」不是一个应当被接受的答案。配置开关**不**绕过；而且请求只是一次切分，
+  不是冻结：之后产生的事件照旧等下一次触发。
+
+  「没有需要整理的内容」和「这个区间已经入队」会如实回报而不是再入队一次，所以问两遍
+  不会产生两条摘要——何况写手按名字幂等，即使并发也不会。结清后按钮**禁用但保留在原
+  位**：隐藏它会让用户每次落后时都要重新发现它，而那正是他们找它的时候。它走记忆标签
+  页自己的路由族，其中第一条**写**路由（`POST /consolidate`）完整保留读路由的三条自
+  认证——回环 socket、回环 `Host`、同源——并且只接受 `POST`，所以链接或 `<img>` 无法触
+  发这次写入。三个面都不会在主会话里发起模型调用。
+
 - **工作单元是裁决出来的，不是猜出来的。** 候选来自 `similar`（唯一会报告距离的
   检索），且排除操作层——在具备该能力的二进制上（hypatia #35）通过查询里的
   `--exclude-tags`；在没这个能力的二进制上，抓四倍的量再丢弃——再按距离上限过滤，
@@ -250,14 +271,16 @@ agent/created ──▶ rules/taboos inject()
   原始 `msg-*` 条目**故意不显示**：它是对话原文，读的人刚刚写过，而正确的读者是
   Agent。
 
-  数据经由本插件注册在 DSH web 服务器上的、会话作用域的只读 HTTP 路由
+  数据经由本插件注册在 DSH web 服务器上的、会话作用域的 HTTP 路由族
   `/api/dsh-hypatia-auto-memory/session` 到达浏览器：状态每次轮询都从内存中的状态表
   现算，shelf 内容只在可能变化时才读（打开时、切换会话时、手动刷新时，以及整合推进了
   该会话水位时），其间缓存 15 秒。标签页在屏幕上时每 5 秒轮询一次，响应是有界的：
   最新的 40 条摘要与 40 条工作单元，每条正文 4000 字符、整份响应 120000 字符。
   JSE 没有 `ORDER BY`，所以「最新」只能在读完所有候选之后判定；扫描触到上限时计数
-  变成下界，标签页会把该次响应标为已截断，而不是让短列表无从解释。路上否掉了两条
-  通道。**session projection** 形态最
+  变成下界，标签页会把该次响应标为已截断，而不是让短列表无从解释。这个路由族里唯一的
+  **写**路由 `POST /consolidate` 就是「立即整理」按钮调用的那个；它自己不写任何东西
+  ——它入队的是与自动触发完全相同的整合任务（见上文「也可以显式要求立刻整合」）。
+  路上否掉了两条通道。**session projection** 形态最
   合适，但驱动它的事件在本仓库之外写不出来：`Session.append` 没有任何途径设置信封的
   `ignorable` 标记，而持久化读取路径会拒绝一个带着未知事件类型、又没有该标记的会话
   日志——所以自定义事件会破坏会话重载。**设置命名空间**即便在还存在时也是根作用域的：
@@ -513,7 +536,8 @@ dsh-hypatia-auto-memory/
 │   ├── cascade.js        # log₁₆(n) 分层摘要归档
 │   ├── model-log.js      # 每次尝试实际用了哪个模型的有界记录
 │   ├── memory-status.js  # 两张状态表按会话折叠（纯函数）
-│   ├── memory-api.js     # 记忆标签页与 shelf 清单：只读路由族 + JSE 读取
+│   ├── memory-api.js     # 记忆标签页与 shelf 清单；含唯一的写路由
+│   ├── on-demand.js      # /hypatia-summarize 与 hypatia_summarize 工具
 │   ├── recall.js         # 会话启动时的 rules/taboos 预载
 │   ├── auto-approve.js   # 批准 Agent 自己的纯 bash hypatia 调用
 │   ├── skills.js         # 随包技能注册（从不遮蔽其它提供者）

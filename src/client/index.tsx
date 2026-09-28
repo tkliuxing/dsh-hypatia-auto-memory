@@ -29,7 +29,7 @@ import { SettingsCard } from './SettingsCard'
 import type { ConfigShape } from './SettingsCard'
 import type { LoadConsolidationModelCatalog } from './consolidation-models'
 import { MemoryView } from './MemoryView'
-import { fetchMemory, fetchShelves } from './memory-client'
+import { fetchMemory, fetchShelves, summarizeMemory } from './memory-client'
 import type { LoadShelfInventory } from './shelves'
 import { BUNDLE_CONFIG_SEAT, SETTINGS_TAB_SEAT, installPluginCard } from './plugin-card-seat'
 import { en, NS, zh } from './locales'
@@ -131,7 +131,7 @@ export function apply(ctx: Context): void {
         order: 20,
         locale: NS,
         label: () => t('viewMemory'),
-        inject: () => ({ fetch: fetchMemory }),
+        inject: () => ({ fetch: fetchMemory, summarize: summarizeMemory }),
       },
       MemoryView,
     ),

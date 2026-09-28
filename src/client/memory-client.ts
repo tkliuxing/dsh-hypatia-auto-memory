@@ -15,6 +15,19 @@ import type { LoadShelfInventory, ShelfInfo, ShelfInventory } from './shelves'
 /** Route prefix the Host claims; the tab appends `/session`. */
 export const MEMORY_API_PREFIX = '/api/dsh-hypatia-auto-memory'
 
+/**
+ * Why an explicit consolidation request queued nothing, matching the Host's
+ * `SUMMARIZE_REASON` vocabulary (src/consolidator.js). Kept as named constants
+ * so the view's switch and the Host's answers cannot drift apart on a typo.
+ */
+export const SUMMARIZE_REASON = {
+  disabled: 'disabled',
+  empty: 'empty',
+  busy: 'busy',
+  unknownSession: 'unknown-session',
+  unavailable: 'unavailable',
+} as const
+
 /** One task that exhausted its attempts. */
 export interface FailedMemoryTask {
   kind: string
@@ -83,6 +96,33 @@ export interface MemoryPayload {
 /** Read one session's memory. `content` also asks the Host to read the shelf. */
 export type FetchMemory = (sessionId: string, options: { content: boolean }) => Promise<MemoryPayload>
 
+/** One explicit consolidation request's outcome, as the Host reports it. */
+export interface SummarizeResult {
+  sessionId: string
+  /** True when the Host accepted a span; false when there was nothing to do. */
+  queued: boolean
+  /** Empty when queued; otherwise one of {@link SUMMARIZE_REASON}. */
+  reason: string
+  /** The half-open span the Host cut, in session-log events. */
+  fromSeq: number
+  toSeq: number
+}
+
+/**
+ * Ask the Host to consolidate one session now.
+ *
+ * This only queues the same task the automatic trigger queues — the summary is
+ * written in the background on the plugin's dedicated model route — so the
+ * promise settles long before anything appears in the shelf. The tab's normal
+ * watermark poll is what shows the result.
+ */
+export type SummarizeMemory = (sessionId: string) => Promise<SummarizeResult>
+
+/** Whether "summarise now" has work to do for this session. */
+export function canSummarize(session: SessionMemoryStatus): boolean {
+  return session.known && !session.caughtUp
+}
+
 /**
  * The URL one refresh reads.
  * @param sessionId - the session the tab is bound to.
@@ -110,6 +150,62 @@ export const fetchMemory: FetchMemory = async (sessionId, { content }) => {
   const payload = parseMemoryPayload(body, sessionId)
   if (payload === undefined) throw new Error('the Host returned an unreadable memory payload')
   return payload
+}
+
+/**
+ * The URL one explicit consolidation request POSTs to.
+ * @param sessionId - the session to consolidate.
+ * @returns a same-origin path with its query.
+ */
+export function summarizeUrl(sessionId: string): string {
+  const query = new URLSearchParams({ session: sessionId })
+  return `${MEMORY_API_PREFIX}/consolidate?${query.toString()}`
+}
+
+/**
+ * Ask the Host to consolidate one session now.
+ *
+ * `POST`, never `GET`: a write must not be reachable from a link or an image
+ * tag. The Host keeps the same self-authentication on this route as on the read
+ * ones (loopback socket, loopback `Host`, same-origin), and the body is empty —
+ * everything the request means is in the URL.
+ */
+export const summarizeMemory: SummarizeMemory = async (sessionId) => {
+  const response = await fetch(summarizeUrl(sessionId), {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { accept: 'application/json' },
+  })
+  const body: unknown = await response.json().catch(() => undefined)
+  if (!response.ok) {
+    const message = isRecord(body) && typeof body.error === 'string' ? body.error : `HTTP ${String(response.status)}`
+    throw new Error(message)
+  }
+  const result = parseSummarizeResult(body, sessionId)
+  if (result === undefined) throw new Error('the Host returned an unreadable consolidation answer')
+  return result
+}
+
+/**
+ * Read the Host's consolidation answer, defensively.
+ *
+ * A body without a boolean `queued` is unreadable rather than "not queued": the
+ * whole point of the answer is to distinguish "accepted" from "nothing to do",
+ * and guessing would put a wrong sentence in front of the user.
+ *
+ * @param value - the parsed response body.
+ * @param sessionId - the session that was asked for.
+ * @returns the result, or undefined when the body is not one.
+ */
+export function parseSummarizeResult(value: unknown, sessionId: string): SummarizeResult | undefined {
+  if (!isRecord(value) || typeof value.queued !== 'boolean') return undefined
+  return {
+    sessionId: str(value.sessionId) || sessionId,
+    queued: value.queued,
+    reason: str(value.reason),
+    fromSeq: num(value.fromSeq),
+    toSeq: num(value.toSeq),
+  }
 }
 
 /**

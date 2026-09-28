@@ -1,5 +1,6 @@
 /**
- * The Memory tab's read-only HTTP route family.
+ * The Memory tab's HTTP route family: the read side the tab is built on, plus
+ * one write route for an explicit "summarise this session now".
  *
  * Why a route and not a settings namespace. The tab needs two different things
  * from the Host: a small per-session status that changes whenever a task
@@ -35,6 +36,20 @@
  * `Origin` / `sec-fetch-site` reading is a browser signal and not an authority
  * claim; the loopback socket is what actually bounds reachability, and the other
  * two narrow it to this page.
+ *
+ * ### Why a WRITE route is allowed to live here
+ *
+ * `POST /consolidate` is the family's first route that causes work, so it is
+ * worth stating why the three checks above are still enough. It writes nothing
+ * itself: it queues the same consolidation task the automatic trigger queues,
+ * through the same function, on the same durable queue. It cannot choose what
+ * is written (the range comes from the Host's own watermarks), cannot name an
+ * entry, and cannot reach beyond the shelf the profile selected. What a hostile
+ * page could do, if it got past the checks, is cause summarisation the user did
+ * not ask for — so the checks are kept exactly as they were, and the write
+ * route is only reachable from a same-origin page on this loopback GUI. Every
+ * route in the family, read or write, calls `isTrustedRequest` first; the write
+ * route adds a method gate (`POST` only) on top.
  *
  * ## What it will not return
  *
@@ -383,13 +398,21 @@ export function fitBudget(entries, spent = 0) {
  *   cli: {query: (jse: string) => Promise<any>, listShelves: () => Promise<{name: string, path: string, connected: boolean}[]>},
  *   read: (sessionId: string) => {sessions: object[], failed: object[]},
  *   status: import('./status.js').StatusLog,
+ *   summarize?: (sessionId: string) => Promise<{sessionId: string, queued: boolean, reason: string, fromSeq: number, toSeq: number}>,
  *   ttlMs?: number,
  *   shelvesTtlMs?: number,
  *   now?: () => number,
- * }} deps - `read` folds the state tables for one session (see memory-status.js).
+ * }} deps - `read` folds the state tables for one session (see memory-status.js);
+ *   `summarize` is the same host action the slash command and the tool call
+ *   (see on-demand.js). Absent, the write route answers 503: a composition
+ *   without a consolidator cannot consolidate, and saying so is better than
+ *   pretending to queue.
  * @returns {{route: {kind: string, path: string, handler: Function}, invalidate: (sessionId?: string) => void, fetchContent: (sessionId: string, watermark?: number) => Promise<object>, fetchShelves: () => Promise<object>}}
  */
-export function createMemoryApi({ cli, read, status, ttlMs = CONTENT_TTL_MS, shelvesTtlMs = SHELVES_TTL_MS, now = Date.now }) {
+export function createMemoryApi({
+  cli, read, status, summarize,
+  ttlMs = CONTENT_TTL_MS, shelvesTtlMs = SHELVES_TTL_MS, now = Date.now,
+}) {
   /** @type {Map<string, {at: number, watermark: number | undefined, value: object}>} */
   const cache = new Map()
   /**
@@ -570,13 +593,47 @@ export function createMemoryApi({ cli, read, status, ttlMs = CONTENT_TTL_MS, she
     writeJson(res, 200, payload)
   }
 
+  /**
+   * Queue an explicit consolidation for one session.
+   *
+   * `POST` only, because a write must never be triggerable by a link or an
+   * `<img>`: a browser sends neither for a POST, and the same-origin check
+   * refuses a cross-site one that a form could send. The body is not read —
+   * the request carries its whole meaning in the session parameter — so there
+   * is nothing here for a malformed payload to corrupt.
+   */
+  async function handleConsolidate(req, res, query) {
+    const sessionId = query.get('session') ?? ''
+    if (sessionId === '') {
+      writeJson(res, 400, { error: 'the session query parameter is required' })
+      return
+    }
+    // Same shape guard as the read route: a session id is hex, dashes and the
+    // `session-` prefix, so this refuses only values that could not be one.
+    if (/[%\\]/.test(sessionId)) {
+      writeJson(res, 400, { error: 'malformed session id' })
+      return
+    }
+    if (summarize === undefined) {
+      writeJson(res, 503, { error: 'consolidation is not available in this composition' })
+      return
+    }
+    try {
+      // Always 200 for an outcome the action itself produced — including
+      // "nothing to do" and "already queued". They are answers, not failures,
+      // and the tab renders the reason; a 4xx would turn the truthful answer
+      // into an error banner.
+      writeJson(res, 200, await summarize(sessionId))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      status.warn(`consolidation request failed for ${sessionId}: ${message}`)
+      writeJson(res, 500, { error: message })
+    }
+  }
+
   async function handler(req, res) {
     if (!isTrustedRequest(req)) {
       writeJson(res, 403, { error: 'forbidden' })
-      return
-    }
-    if ((req.method ?? 'GET') !== 'GET') {
-      writeJson(res, 405, { error: 'method not allowed' })
       return
     }
     let url
@@ -587,13 +644,30 @@ export function createMemoryApi({ cli, read, status, ttlMs = CONTENT_TTL_MS, she
       writeJson(res, 400, { error: 'malformed request url' })
       return
     }
+    const method = req.method ?? 'GET'
     const path = url.pathname.slice(MEMORY_API_PREFIX.length)
     if (path === '/shelves') {
+      if (method !== 'GET') {
+        writeJson(res, 405, { error: 'method not allowed' })
+        return
+      }
       writeJson(res, 200, await fetchShelves())
+      return
+    }
+    if (path === '/consolidate') {
+      if (method !== 'POST') {
+        writeJson(res, 405, { error: 'method not allowed' })
+        return
+      }
+      await handleConsolidate(req, res, url.searchParams)
       return
     }
     if (path !== '/session') {
       writeJson(res, 404, { error: 'not found' })
+      return
+    }
+    if (method !== 'GET') {
+      writeJson(res, 405, { error: 'method not allowed' })
       return
     }
     await handleSession(req, res, url.searchParams)

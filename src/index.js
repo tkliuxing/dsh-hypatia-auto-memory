@@ -11,6 +11,8 @@
  *     ├─ recall      (inject agents)          — rules/taboos preload at session start
  *     ├─ housekeeping (inject sessionPersistence) — prune progress of vanished sessions
  *     ├─ memory-api  (inject webServer)       — the Memory tab + shelf listing routes
+ *     ├─ on-demand   (inject commands)        — /hypatia-summarize, no model turn
+ *     ├─ on-demand   (inject tools)           — the hypatia_summarize tool
  *     ├─ auto-approve (inject approval, tools) — the agent's own bash `hypatia` calls
  *     └─ skills      (inject skills)          — hypatia-memory, hypatia, hypatia-dream
  *
@@ -38,6 +40,14 @@ import { TaskDeferredError, createQueue } from './queue.js'
 import { countLoggableMessages, createCollector, formatSpan } from './collector.js'
 import { createCascade } from './cascade.js'
 import { createConsolidator, PLUGIN_NAME } from './consolidator.js'
+import {
+  SUMMARIZE_COMMAND,
+  SUMMARIZE_TOOL,
+  disabledOutcome,
+  registerSummarizeCommand,
+  registerSummarizeTool,
+  unavailableOutcome,
+} from './on-demand.js'
 import { openModelLog } from './model-log.js'
 import { createReasoningResolver } from './reasoning.js'
 import { buildStatus } from './memory-status.js'
@@ -126,17 +136,18 @@ function applyCollect(ctx, configHandle, status) {
   })
 
   /**
-   * The Memory tab's read side and the settings card's shelf listing.
+   * The Memory tab's read side and the settings card's shelf listing, plus the
+   * one write route an explicit "summarise now" rides.
    * Optional: it needs `webServer`, so a headless or TUI composition simply has
    * no Memory tab and nothing else changes. The route authenticates itself —
    * see memory-api.js.
    */
-  function mountMemoryApi({ cli, read, shared }) {
+  function mountMemoryApi({ cli, read, shared, summarize }) {
     ctx.plugin({
       name: `${name}/memory-api`,
       inject: ['webServer'],
       apply: (c) => {
-        const api = createMemoryApi({ cli, read, status })
+        const api = createMemoryApi({ cli, read, status, summarize })
         c.effect(() => {
           const unregister = c.webServer.register(api.route)
           shared.memoryApi = api
@@ -166,6 +177,9 @@ function applyCollect(ctx, configHandle, status) {
         }),
         read: (sessionId) => buildStatus({ progressEntries: [], taskEntries: [], sessionId }),
         shared: {},
+        // No state is being written while the plugin is off, so the route
+        // answers with the truth rather than an empty span.
+        summarize: disabledOutcome,
       })
       return
     }
@@ -263,6 +277,20 @@ function applyCollect(ctx, configHandle, status) {
     // needs `webServer`, and a headless composition has none.
     const shared = { consolidator: undefined, memoryApi: undefined }
 
+    /**
+     * The one function all three explicit faces call: the slash command, the
+     * tool, and the Memory tab's button. Late-bound like the rest of `shared`,
+     * because the consolidator only exists once `llm` arrives; before that (or
+     * in a composition without `llm` at all) the request is answered honestly
+     * as unavailable rather than silently dropped.
+     *
+     * @param {string} sessionId
+     * @returns {Promise<{sessionId: string, queued: boolean, reason: string, fromSeq: number, toSeq: number}>}
+     */
+    const summarizeNow = (sessionId) => shared.consolidator === undefined
+      ? Promise.resolve(unavailableOutcome(sessionId))
+      : shared.consolidator.consolidateNow(sessionId)
+
     // Mounted before reconcile and backfill, which can take long or fail: the
     // settings card's shelf listing rides this route family, and a broken
     // shelf is exactly when the user needs it.
@@ -274,6 +302,7 @@ function applyCollect(ctx, configHandle, status) {
         sessionId,
       }),
       shared,
+      summarize: summarizeNow,
     })
 
     const writer = createWriter(cli, {
@@ -524,6 +553,30 @@ function applyCollect(ctx, configHandle, status) {
         queue.registerExecutor('cascade', invalidatingContent(cascade.execute))
         shared.consolidator = consolidator
       },
+    })
+
+    // The two Host-side faces of an explicit "summarise this session now".
+    //
+    // Separate fibers on purpose: `commands` is absent from a headless or TUI
+    // composition while `tools` is present, and one fiber injecting both would
+    // take the tool down with the missing command registry. Neither is mounted
+    // under `auto-approve`, which exists only when `autoApprove !== false` and
+    // has nothing to do with this — the tool is a first-class action, not a
+    // shell call to approve.
+    //
+    // Both read `summarizeNow` at invocation time, so registering them before
+    // the consolidate fiber settles is fine; a request that arrives before a
+    // route exists is answered as unavailable instead of silently dropped.
+    ctx.inject(['commands'], (commandCtx) => {
+      try {
+        registerSummarizeCommand(commandCtx, { run: summarizeNow, status })
+      } catch (error) {
+        status.warn(`/${SUMMARIZE_COMMAND} could not be registered: ${String(error)}`)
+      }
+    })
+    ctx.inject(['tools'], (toolCtx) => {
+      void registerSummarizeTool(toolCtx, { run: summarizeNow, status })
+        .catch((error) => status.warn(`the ${SUMMARIZE_TOOL} tool could not be registered: ${String(error)}`))
     })
 
     ctx.plugin({

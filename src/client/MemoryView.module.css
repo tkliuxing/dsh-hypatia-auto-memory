@@ -82,7 +82,8 @@
 
 .status,
 .hint,
-.error {
+.error,
+.notice {
   margin: 0;
   font-size: 12px;
   line-height: 1.6;
@@ -95,6 +96,10 @@
 
 .error {
   color: var(--dsw-alias-label-error);
+}
+
+.notice {
+  color: var(--dsw-alias-label-secondary);
 }
 
 .group {
@@ -175,6 +180,38 @@
   color: var(--dsw-alias-label-primary);
   border: 0.5px solid var(--dsw-alias-border-l4);
   background: var(--dsw-alias-bg-layer-3);
+}
+
+/* Sits on the "consolidation" row, beside the gap it acts on. Disabled — not
+   hidden — once the session is caught up, so the control stays where the user
+   already found it. */
+.summarize {
+  appearance: none;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: 6px;
+  background: none;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
+.summarize:hover:enabled {
+  border-color: var(--dsw-alias-label-dimmed);
+  color: var(--dsw-alias-label-primary);
+}
+
+.summarize:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+
+.summarize:disabled {
+  border-color: var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-dimmed);
+  cursor: default;
 }
 
 .failures {

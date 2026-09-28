@@ -8,11 +8,15 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   MEMORY_API_PREFIX,
+  SUMMARIZE_REASON,
+  canSummarize,
   consolidationGap,
   memoryUrl,
   mergeMemory,
   parseMemoryPayload,
   parseShelfInventory,
+  parseSummarizeResult,
+  summarizeMemory,
 } from '../src/client/memory-client.ts'
 
 const SESSION = 'session-83f81e10-4e4b-4eaa-8ff1-9af30e5e1caa'
@@ -246,4 +250,72 @@ test('parseShelfInventory reads the /shelves answer, defensively', () => {
   })
   assert.equal(parseShelfInventory(undefined), undefined)
   assert.equal(parseShelfInventory(['not', 'an', 'object']), undefined)
+})
+
+/* -------------------------------------------- explicit consolidation ------ */
+
+test('an explicit request POSTs one same-origin path, parameterized by session', async (t) => {
+  const calls = []
+  const original = globalThis.fetch
+  t.after(() => { globalThis.fetch = original })
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url, init })
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ sessionId: SESSION, queued: true, reason: '', fromSeq: 12, toSeq: 40 }),
+    }
+  }
+
+  const result = await summarizeMemory(SESSION)
+  assert.deepEqual(result, { sessionId: SESSION, queued: true, reason: '', fromSeq: 12, toSeq: 40 })
+  assert.equal(calls.length, 1)
+  // A write must never be reachable from a link or an image tag, so it is a POST
+  // even though it carries no body.
+  assert.equal(calls[0].init.method, 'POST')
+  assert.equal(calls[0].init.credentials, 'same-origin')
+  assert.equal(calls[0].init.body, undefined)
+  const url = new URL(calls[0].url, 'http://127.0.0.1:3080')
+  assert.equal(url.pathname, `${MEMORY_API_PREFIX}/consolidate`)
+  assert.equal(url.searchParams.get('session'), SESSION)
+})
+
+test('a refused request surfaces the Host reason, not a bare status', async (t) => {
+  const original = globalThis.fetch
+  t.after(() => { globalThis.fetch = original })
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 403,
+    json: async () => ({ error: 'forbidden' }),
+  })
+  await assert.rejects(summarizeMemory(SESSION), /forbidden/)
+
+  globalThis.fetch = async () => ({ ok: false, status: 502, json: async () => undefined })
+  await assert.rejects(summarizeMemory(SESSION), /HTTP 502/)
+})
+
+test('an unreadable answer is rejected rather than read as "not queued"', () => {
+  assert.equal(parseSummarizeResult(undefined, SESSION), undefined)
+  assert.equal(parseSummarizeResult({ reason: 'empty' }, SESSION), undefined, 'the queued flag is the answer')
+  assert.deepEqual(parseSummarizeResult({ queued: false, reason: 'busy' }, SESSION), {
+    sessionId: SESSION,
+    queued: false,
+    reason: 'busy',
+    fromSeq: 0,
+    toSeq: 0,
+  })
+  assert.deepEqual(
+    parseSummarizeResult({ sessionId: 'other', queued: true, reason: '', fromSeq: 1, toSeq: 2 }, SESSION).sessionId,
+    'other',
+  )
+})
+
+test('the button is offered exactly while there is something to summarise', () => {
+  assert.equal(canSummarize({ ...SESSION_VIEW, caughtUp: false, known: true }), true)
+  assert.equal(canSummarize({ ...SESSION_VIEW, caughtUp: true, known: true }), false, 'caught up: disabled')
+  assert.equal(canSummarize({ ...SESSION_VIEW, caughtUp: false, known: false }), false, 'nothing logged yet')
+})
+
+test('the reason vocabulary the Host sends is the one the view switches on', () => {
+  assert.deepEqual(Object.values(SUMMARIZE_REASON), ['disabled', 'empty', 'busy', 'unknown-session', 'unavailable'])
 })

@@ -84,6 +84,29 @@ export function budgetForEffort(baseTokens, effort) {
   return outputBudget(baseTokens, effort === THINKING_OFF_EFFORT)
 }
 
+/** The one queue kind explicit requests and the automatic triggers both use. */
+const CONSOLIDATE_KIND = 'consolidate'
+
+/**
+ * Why an explicit "summarise this session now" request queued nothing.
+ *
+ * The three faces (slash command, Memory tab button, agent tool) all report
+ * from this vocabulary rather than inventing their own wording, because they
+ * all call the same host action and must tell the user the same truth.
+ */
+export const SUMMARIZE_REASON = Object.freeze({
+  /** The plugin or its consolidation half is switched off in the config. */
+  Disabled: 'disabled',
+  /** Everything logged is already consolidated: there is no span to cut. */
+  Empty: 'empty',
+  /** A queued or running task already covers the whole requested span. */
+  Busy: 'busy',
+  /** No session with that id is live or reachable through persistence. */
+  Unknown: 'unknown-session',
+  /** No consolidation half is mounted, so nothing can run (no model route). */
+  Unavailable: 'unavailable',
+})
+
 /** Distinguishes permanent failures (no retry value) from transient ones. */
 export class PermanentConsolidationError extends Error {
   constructor(message) {
@@ -398,7 +421,6 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
     if ((state.pendingTokens ?? 0) < tokenFloor) {
       return { resetTokens: false, advanceCheckpoint: false }
     }
-    const current = progress.get(sessionId) ?? EMPTY_PROGRESS
     // Awaited: the resolver falls back to persistence for a session the store
     // will never publish again (see persisted-session.js).
     const session = await sessions.get(sessionId)
@@ -406,24 +428,11 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
       status.warn(`consolidation deferred for ${sessionId}: session not live`)
       return { resetTokens: false, advanceCheckpoint: false }
     }
-    const fromSeq = consolidationStart(current, session)
-    const toSeq = Math.min(session.seq ?? 0, current.lastLoggedSeq)
-    if (toSeq <= fromSeq) {
+    const span = await enqueueSpan(sessionId, session)
+    if (span === undefined) {
       return { resetTokens: false, advanceCheckpoint: false }
     }
-    const project = await projectFor(session)
-    // Immediate: the thresholds already decided this span is ready. Riding the
-    // flush window only delayed it by `flushWindowMs` (two minutes by default),
-    // and a restart inside that window left the task persisted but unscheduled.
-    await queue.enqueue({
-      kind: 'consolidate',
-      sessionId,
-      fromSeq,
-      toSeq,
-      project,
-      immediate: true,
-    })
-    status.info(`consolidation scheduled: ${sessionId} [${fromSeq}, ${toSeq})`)
+    status.info(`consolidation scheduled: ${sessionId} [${span.fromSeq}, ${span.toSeq})`)
     return { resetTokens: true, advanceCheckpoint: true }
   }
 
@@ -544,6 +553,39 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
   }
 
   /**
+   * The one place a consolidation span is cut and queued.
+   *
+   * Every automatic trigger and every explicit user request goes through this,
+   * so the range arithmetic (`fromSeq` never inside a fork's inherited prefix,
+   * `toSeq` never past what has been logged) and the task shape exist once.
+   *
+   * @param {string} sessionId
+   * @param {any} session
+   * @returns {Promise<{fromSeq: number, toSeq: number} | undefined>} the span,
+   *   or undefined when there is nothing to cut.
+   */
+  async function enqueueSpan(sessionId, session) {
+    const current = progress.get(sessionId) ?? EMPTY_PROGRESS
+    const fromSeq = consolidationStart(current, session)
+    const toSeq = Math.min(session?.seq ?? 0, current.lastLoggedSeq)
+    if (toSeq <= fromSeq) return undefined
+    const project = await projectFor(session)
+    // Immediate: the caller already decided this span is ready — the thresholds
+    // were met, the session is ending, or a human asked. Riding the flush window
+    // only delayed it by `flushWindowMs` (two minutes by default), and a restart
+    // inside that window left the task persisted but unscheduled.
+    await queue.enqueue({
+      kind: CONSOLIDATE_KIND,
+      sessionId,
+      fromSeq,
+      toSeq,
+      project,
+      immediate: true,
+    })
+    return { fromSeq, toSeq }
+  }
+
+  /**
    * Final consolidation for a session that is ending.
    *
    * Thresholds are deliberately not applied. They exist to pace an ongoing
@@ -559,21 +601,64 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
   async function onSessionEnd(sessionId, session) {
     const config = getConfig()
     if (config.enabled === false || config.consolidation.enabled === false) return false
+    const span = await enqueueSpan(sessionId, session)
+    if (span === undefined) return false
+    status.info(`consolidation scheduled at session end: ${sessionId} [${span.fromSeq}, ${span.toSeq})`)
+    return true
+  }
+
+  /**
+   * Consolidate a session because a HUMAN asked for it right now.
+   *
+   * Same path as {@link onSessionEnd} — same span arithmetic, same task, same
+   * executor — with one difference: the session is not ending, so the cut is
+   * only a cut. The span is `[watermark, min(seq, lastLoggedSeq))` at the
+   * moment of the request, and everything appended afterwards waits for the
+   * next trigger exactly as it would have. Nothing is frozen.
+   *
+   * The thresholds are deliberately bypassed. They pace an ongoing
+   * conversation; an explicit request IS the reason to cut now, and the
+   * measured gap this exists for is 151 logged events against a token floor
+   * that had only accumulated 645 — a request cannot wait for a gate that may
+   * never open. The config switches are NOT bypassed: an explicit request is
+   * not a reason to write while the user has the plugin or its consolidation
+   * half turned off.
+   *
+   * @param {string} sessionId
+   * @returns {Promise<{sessionId: string, queued: boolean, reason: string,
+   *   fromSeq: number, toSeq: number}>} `reason` is '' when queued, otherwise
+   *   one of {@link SUMMARIZE_REASON}.
+   */
+  async function consolidateNow(sessionId) {
+    const config = getConfig()
+    if (config.enabled === false || config.consolidation.enabled === false) {
+      return { sessionId, queued: false, reason: SUMMARIZE_REASON.Disabled, fromSeq: 0, toSeq: 0 }
+    }
+    const session = await sessions.get(sessionId)
+    if (session === undefined) {
+      status.warn(`consolidation requested for ${sessionId}, but the session is not available`)
+      return { sessionId, queued: false, reason: SUMMARIZE_REASON.Unknown, fromSeq: 0, toSeq: 0 }
+    }
     const current = progress.get(sessionId) ?? EMPTY_PROGRESS
     const fromSeq = consolidationStart(current, session)
     const toSeq = Math.min(session?.seq ?? 0, current.lastLoggedSeq)
-    if (toSeq <= fromSeq) return false
-    const project = await projectFor(session)
-    await queue.enqueue({
-      kind: 'consolidate',
-      sessionId,
-      fromSeq,
-      toSeq,
-      project,
-      immediate: true,
-    })
-    status.info(`consolidation scheduled at session end: ${sessionId} [${fromSeq}, ${toSeq})`)
-    return true
+    if (toSeq <= fromSeq) {
+      return { sessionId, queued: false, reason: SUMMARIZE_REASON.Empty, fromSeq, toSeq }
+    }
+    // A task already accepted for this range makes the request redundant: it is
+    // the same work. Only work that is actually scheduled counts — a `deferred`
+    // record is waiting for a session that is, by construction, available here
+    // (the lookup above just answered), so this request is re-enqueueing it,
+    // which is what schedules it. Nothing that falls through loses events:
+    // `enqueue` widens the record and the queue re-runs the uncovered tail.
+    const existing = queue.peek?.(CONSOLIDATE_KIND, sessionId)
+    const scheduled = existing !== undefined && (existing.status === 'pending' || existing.status === 'running')
+    if (scheduled && toSeq <= existing.toSeq) {
+      return { sessionId, queued: false, reason: SUMMARIZE_REASON.Busy, fromSeq, toSeq }
+    }
+    await enqueueSpan(sessionId, session)
+    status.info(`consolidation scheduled on request: ${sessionId} [${fromSeq}, ${toSeq})`)
+    return { sessionId, queued: true, reason: '', fromSeq, toSeq }
   }
 
   /** Queue executor for one consolidate task. */
@@ -797,6 +882,7 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
   return {
     onTurnEnd,
     onSessionEnd,
+    consolidateNow,
     adjudicate,
     // The pure priority selector, shared with the cascade: both executors hold
     // their own `task.attempts`, so neither needs a place of its own in a
