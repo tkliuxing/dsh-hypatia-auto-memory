@@ -1,0 +1,17 @@
+<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M18 6.4L30.6 12.4H5.4Z" fill="url(#a)" />
+  <path d="M6.2 12.4H29.8V13.9Q29.8 14.8 28.9 14.8H7.1Q6.2 14.8 6.2 13.9V12.4Z" fill="url(#a)" />
+  <path d="M7.1 15.9Q7.1 14.8 8.2 14.8H8.8Q9.9 14.8 9.9 15.9V27.2H7.1V15.9ZM6.7 14.8H10.3V15.7H6.7ZM13.43 15.9Q13.43 14.8 14.53 14.8H15.13Q16.23 14.8 16.23 15.9V27.2H13.43V15.9ZM13.03 14.8H16.63V15.7H13.03ZM19.77 15.9Q19.77 14.8 20.87 14.8H21.47Q22.57 14.8 22.57 15.9V27.2H19.77V15.9ZM19.37 14.8H22.97V15.7H19.37ZM26.1 15.9Q26.1 14.8 27.2 14.8H27.8Q28.9 14.8 28.9 15.9V27.2H26.1V15.9ZM25.7 14.8H29.3V15.7H25.7Z" fill="url(#b)" />
+  <rect x="5.4" y="27.2" width="25.2" height="2.4" rx="1.1" fill="url(#a)" />
+  <path d="M6.4 12.55H29.6" stroke="#FFFFFF" stroke-width="0.95" stroke-linecap="round" />
+  <defs>
+    <linearGradient id="a" x1="18" y1="6" x2="18" y2="30" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7AC2FF" />
+      <stop offset="1" stop-color="#4A65E8" />
+    </linearGradient>
+    <linearGradient id="b" x1="18" y1="6" x2="18" y2="30" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7CB7FF" />
+      <stop offset="1" stop-color="#45D9E7" />
+    </linearGradient>
+  </defs>
+</svg>
