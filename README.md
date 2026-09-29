@@ -396,7 +396,10 @@ plugin's Config schema onto the sidebar's **Plugins** page, and the card renders
 on this bundle's own page there; a deployment whose profile renders no Plugins
 page gets the same card as a tab under **Settings → Built-in plugins**. The card
 takes whichever seat exists and moves between them without ever appearing twice
-(`src/client/plugin-card-seat.ts`). Every field below applies on
+(`src/client/plugin-card-seat.ts`). On the bundle's own page it starts folded to
+its header, because that page already names the plugin; as a Settings tab it
+starts open. Folding keeps staged edits, but nothing is written before Save and
+leaving the page drops them. Every field below applies on
 save, without a profile reload. Stored as the plugin entry's `config:` in the
 profile patch; a pre-0.1.7 `settings.yaml` section is imported once on first
 launch. All fields optional, defaults shown. A blank consolidation route is

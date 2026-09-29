@@ -10,6 +10,7 @@ export const zh = {
   title: 'Hypatia Auto Memory',
   description:
     '自动将对话轮次记录到 Hypatia，并在新内容足够多时通过独立模型路由进行后台整合。',
+  configSection: '配置',
   enable: '启用自动记忆',
   autoApprove: '自动批准模型发起的 hypatia 命令',
   autoApproveHint: '仅限不含管道、重定向、命令串联的纯 hypatia 调用；插件自身的写入不经过此路径。关闭后模型每次检索都会弹出批准框。保存后采集器会自动重启以应用新值。',
@@ -58,10 +59,10 @@ export const zh = {
   advancedHint:
     '高级字段（二进制、收集器上限、队列调优）可在「设置 → 插件」的本插件页，或 profile patch 的 {ns} 条目 config 下编辑。',
   reset: '重置',
-  discard: '放弃',
   save: '保存',
   saving: '保存中…',
   saveFailed: '保存失败：{message}',
+  saveFailedShort: '保存失败',
   readOnly: '只读：当前上下文不可写入设置文档。',
   unsaved: '未保存',
   viewMemory: '记忆',
@@ -127,6 +128,7 @@ export const en = {
   title: 'Hypatia Auto Memory',
   description:
     'Auto-memory logs conversation turns into Hypatia and runs background consolidation on a dedicated model route.',
+  configSection: 'Configuration',
   enable: 'Enable auto-memory',
   autoApprove: "Auto-approve the agent's own hypatia commands",
   autoApproveHint: 'Only plain hypatia calls with no pipe, redirect or chaining; this plugin\'s own writes never take that path. With it off, every retrieval raises an approval prompt. Saving a change restarts the collector to apply it.',
@@ -175,10 +177,10 @@ export const en = {
   advancedHint:
     'Advanced fields (binaries, collector caps, queue tuning) can be edited in Settings → Plugins under this plugin, or under the {ns} entry\'s config in the profile patch.',
   reset: 'Reset',
-  discard: 'Discard',
   save: 'Save',
   saving: 'Saving…',
   saveFailed: 'Save failed: {message}',
+  saveFailedShort: 'Save failed',
   readOnly: 'Read-only: settings document is not writable in this context.',
   unsaved: 'Unsaved',
   viewMemory: 'Memory',

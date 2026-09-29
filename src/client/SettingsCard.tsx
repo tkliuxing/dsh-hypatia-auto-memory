@@ -2,12 +2,17 @@
  * Configuration card for the `hypatia-auto-memory` namespace, rendered on
  * whichever seat the harness offers (see `plugin-card-seat.ts`).
  *
- * The card owns its disclosure state and stages edits until Save. Its visual
- * treatment mirrors the DSH plugin-settings cards while remaining bundle-local.
+ * The card is a disclosure over the harness's own settings form: the header
+ * folds it (collapsed by default where the page already names the plugin), and
+ * the frame inside — read-only notice, controls, save, failure line — is
+ * `SettingsForm` with the shared `Switch`, so only the fields this plugin
+ * invents are drawn here. Edits are staged until Save, as the form expects.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import {
+  IconChevronDownOutlineRegular, Input, SettingsForm, Switch,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -77,13 +82,27 @@ function same(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b)
 }
 
+/** Which seat renders the card: the bundle's own page on the Plugins page, or the Settings fallback tab. */
+export type SettingsCardSeat = 'official' | 'settings-tab'
+
 export type SettingsCardProps = {
   scope: ConfigForm<ConfigShape>
   loadModelCatalog: LoadConsolidationModelCatalog
   loadShelfInventory: LoadShelfInventory
+  /**
+   * The seat this instance occupies. The Plugins page draws the bundle's title
+   * and one-liner above the card, so the card heads itself with the section's
+   * own name there; the Settings tab has no such page, so the card carries the
+   * plugin's name instead and starts expanded.
+   */
+  seat: SettingsCardSeat
 } & PropsLocale<typeof NS>
 
-export function SettingsCard({ scope, loadModelCatalog, loadShelfInventory, t }: SettingsCardProps) {
+export function SettingsCard({ scope, loadModelCatalog, loadShelfInventory, seat, t }: SettingsCardProps) {
+  const bodyId = useId()
+  // Collapsed by default where the page already names the plugin; the Settings
+  // tab is the plugin's whole page, so its card opens.
+  const [open, setOpen] = useState(seat === 'settings-tab')
   const { snap, value } = useScopeValue(scope)
   const disabled = !snap.writable
   const base = useMemo(() => (snap.base ?? {}) as ConfigShape, [snap.base])
@@ -360,480 +379,469 @@ export function SettingsCard({ scope, loadModelCatalog, loadShelfInventory, t }:
   return (
     <section className={css.card} aria-label={t('title')}>
       <div className={css.header}>
-        <span className={css.headText}>
-          <span className={css.name}>{t('title')}</span>
-          <span className={css.description}>{t('description')}</span>
-        </span>
-        {dirty ? <span className={css.pending}>{t('unsaved')}</span> : null}
+        <button
+          type="button"
+          className={css.toggle}
+          aria-expanded={open}
+          aria-controls={bodyId}
+          onClick={() => { setOpen(value => !value) }}
+        >
+          <IconChevronDownOutlineRegular className={css.chevron} size={12} aria-hidden="true" />
+          {seat === 'settings-tab'
+            ? (
+              <span className={css.headText}>
+                <span className={css.name}>{t('title')}</span>
+                <span className={css.description}>{t('description')}</span>
+              </span>
+            )
+            : <span className={css.sectionName}>{t('configSection')}</span>}
+        </button>
+        {error !== null
+          ? <span className={css.failedPill}>{t('saveFailedShort')}</span>
+          : dirty ? <span className={css.pending}>{t('unsaved')}</span> : null}
       </div>
 
-      <div className={css.body}>
-        {!snap.writable ? <p className={css.readOnly} role="status">{t('readOnly')}</p> : null}
-
-        <div className={css.field}>
-          <div className={css.fieldHead}>
-            <label className={css.label} htmlFor="ham-enabled">{t('enable')}</label>
-            {draft.enabled !== (base.enabled ?? true) ? (
-              <button
-                type="button"
-                className={css.reset}
-                disabled={disabled}
-                onClick={() => setDraft((current) => ({ ...current, enabled: base.enabled ?? true }))}
-              >
-                {t('reset')}
-              </button>
-            ) : null}
-          </div>
-          <button
-            id="ham-enabled"
-            type="button"
-            role="switch"
-            aria-checked={draft.enabled ?? true}
-            aria-label={t('enable')}
-            className={`${css.switch} ${draft.enabled ?? true ? css.switchOn : ''}`}
-            disabled={disabled}
-            onClick={() => setDraft((current) => ({ ...current, enabled: !(current.enabled ?? true) }))}
-          >
-            <span className={css.switchThumb} />
-          </button>
-        </div>
-
-        <div className={css.field}>
-          <div className={css.fieldHead}>
-            <label className={css.label} htmlFor="ham-autoApprove">{t('autoApprove')}</label>
-            {(draft.autoApprove ?? true) !== (base.autoApprove ?? true) ? (
-              <button
-                type="button"
-                className={css.reset}
-                disabled={disabled}
-                onClick={() => setDraft((current) => ({ ...current, autoApprove: base.autoApprove ?? true }))}
-              >
-                {t('reset')}
-              </button>
-            ) : null}
-          </div>
-          <button
-            id="ham-autoApprove"
-            type="button"
-            role="switch"
-            aria-checked={draft.autoApprove ?? true}
-            aria-label={t('autoApprove')}
-            className={`${css.switch} ${draft.autoApprove ?? true ? css.switchOn : ''}`}
-            disabled={disabled}
-            onClick={() => setDraft((current) => ({ ...current, autoApprove: !(current.autoApprove ?? true) }))}
-          >
-            <span className={css.switchThumb} />
-          </button>
-          <p className={css.hint}>{t('autoApproveHint')}</p>
-        </div>
-
-        <div className={css.field}>
-          <div className={css.fieldHead}>
-            <label className={css.label} htmlFor="ham-shelf">{t('shelf')}</label>
-            {draftShelf !== baseShelf ? (
-              <button
-                type="button"
-                className={css.reset}
-                disabled={disabled}
-                onClick={() => setDraft((current) => ({ ...current, shelf: baseShelf }))}
-              >
-                {t('reset')}
-              </button>
-            ) : null}
-          </div>
-          <select
-            id="ham-shelf"
-            className={css.select}
-            value={draftShelf}
-            disabled={disabled || saving}
-            onChange={(event) => {
-              const shelf = event.target.value
-              setDraft((current) => ({ ...current, shelf }))
-            }}
-          >
-            {choices.map(choice => (
-              <option key={choice.name} value={choice.name}>
-                {choice.name}
-                {choice.path !== '' ? ` — ${choice.path}` : ''}
-                {!choice.listed
-                  ? t('shelfOptionStatus', { status: t('shelfNotListed') })
-                  : !choice.connected ? t('shelfOptionStatus', { status: t('shelfDisconnected') }) : ''}
-              </option>
-            ))}
-          </select>
-          {shelfStatus === 'loading' ? <p className={css.notice} role="status">{t('shelfLoading')}</p> : null}
-          {shelfStatus === 'error' ? (
-            <div className={css.catalogError} role="alert">
-              <span>{t('shelfLoadFailed')}</span>
-              <button type="button" disabled={saving} onClick={() => { void loadShelves() }}>{t('retry')}</button>
+      {/* Kept mounted while collapsed: a disclosure is not a page change, and a
+          staged edit must survive folding the card. */}
+      <div className={css.body} id={bodyId} hidden={!open}>
+        <SettingsForm
+          labels={{
+            unavailable: t('unavailable', { ns: NS }),
+            readOnly: t('readOnly'),
+            saveFailed: t('saveFailed', { message: error ?? '' }),
+            save: t('save'),
+            saving: t('saving'),
+          }}
+          // The loading and unavailable documents return above, so the frame
+          // this renders is always an available one.
+          state={{ available: true, writable: snap.writable, dirty, invalid: false, saving, failed: error !== null }}
+          onSave={() => { void save() }}
+          onDiscard={discard}
+        >
+          <div className={css.field}>
+            <div className={css.fieldHead}>
+              <span className={css.label}>{t('enable')}</span>
+              {draft.enabled !== (base.enabled ?? true) ? (
+                <button
+                  type="button"
+                  className={css.reset}
+                  disabled={disabled}
+                  onClick={() => setDraft((current) => ({ ...current, enabled: base.enabled ?? true }))}
+                >
+                  {t('reset')}
+                </button>
+              ) : null}
             </div>
-          ) : null}
-          {shelfStatus === 'ready' && shelfListingError !== '' ? (
-            <p className={css.notice} role="status">{t('shelfListingFailed', { message: shelfListingError })}</p>
-          ) : null}
-          {shelfStatus === 'ready' && shelfListingError === '' && chosen !== undefined && (!chosen.listed || !chosen.connected) ? (
-            <p className={css.warning} role="status">{t(chosen.listed ? 'shelfDisconnectedWarning' : 'shelfNotListedWarning', { shelf: chosen.name })}</p>
-          ) : null}
-          <p className={css.hint}>{t('shelfHint')}</p>
-        </div>
+            <Switch
+              checked={draft.enabled ?? true}
+              label={t('enable')}
+              disabled={disabled}
+              onChange={(enabled) => setDraft((current) => ({ ...current, enabled }))}
+            />
+          </div>
 
-        <section className={css.group} aria-labelledby="ham-consolidation-title">
-          <h3 id="ham-consolidation-title" className={css.groupTitle}>{t('consolidationTitle')}</h3>
-          <p className={css.hint}>{t('modelSelectionHint')}</p>
+          <div className={css.field}>
+            <div className={css.fieldHead}>
+              <span className={css.label}>{t('autoApprove')}</span>
+              {(draft.autoApprove ?? true) !== (base.autoApprove ?? true) ? (
+                <button
+                  type="button"
+                  className={css.reset}
+                  disabled={disabled}
+                  onClick={() => setDraft((current) => ({ ...current, autoApprove: base.autoApprove ?? true }))}
+                >
+                  {t('reset')}
+                </button>
+              ) : null}
+            </div>
+            <Switch
+              checked={draft.autoApprove ?? true}
+              label={t('autoApprove')}
+              disabled={disabled}
+              onChange={(autoApprove) => setDraft((current) => ({ ...current, autoApprove }))}
+            />
+            <p className={css.hint}>{t('autoApproveHint')}</p>
+          </div>
 
-          <div className={css.modelSelection}>
-            {catalogStatus === 'loading' ? <p className={css.notice} role="status">{t('modelCatalogLoading')}</p> : null}
-            {catalogStatus === 'error' ? (
+          <div className={css.field}>
+            <div className={css.fieldHead}>
+              <label className={css.label} htmlFor="ham-shelf">{t('shelf')}</label>
+              {draftShelf !== baseShelf ? (
+                <button
+                  type="button"
+                  className={css.reset}
+                  disabled={disabled}
+                  onClick={() => setDraft((current) => ({ ...current, shelf: baseShelf }))}
+                >
+                  {t('reset')}
+                </button>
+              ) : null}
+            </div>
+            <select
+              id="ham-shelf"
+              className={css.select}
+              value={draftShelf}
+              disabled={disabled || saving}
+              onChange={(event) => {
+                const shelf = event.target.value
+                setDraft((current) => ({ ...current, shelf }))
+              }}
+            >
+              {choices.map(choice => (
+                <option key={choice.name} value={choice.name}>
+                  {choice.name}
+                  {choice.path !== '' ? ` — ${choice.path}` : ''}
+                  {!choice.listed
+                    ? t('shelfOptionStatus', { status: t('shelfNotListed') })
+                    : !choice.connected ? t('shelfOptionStatus', { status: t('shelfDisconnected') }) : ''}
+                </option>
+              ))}
+            </select>
+            {shelfStatus === 'loading' ? <p className={css.notice} role="status">{t('shelfLoading')}</p> : null}
+            {shelfStatus === 'error' ? (
               <div className={css.catalogError} role="alert">
-                <span>{t('modelCatalogFailed')}</span>
-                <button type="button" disabled={saving} onClick={() => { void loadCatalog() }}>{t('retry')}</button>
+                <span>{t('shelfLoadFailed')}</span>
+                <button type="button" disabled={saving} onClick={() => { void loadShelves() }}>{t('retry')}</button>
               </div>
             ) : null}
-            {catalogPartial ? <p className={css.notice}>{t('modelCatalogPartial')}</p> : null}
-            {candidates.length > 0 ? (
-              <>
-                <fieldset className={css.models}>
-                  <legend>{t('selectedModels')}</legend>
-                  {selectedModels.length === 0 ? (
-                    <p className={css.notice}>{t('selectedModelsEmpty')}</p>
-                  ) : selectedModels.map((candidate, index) => (
-                    <div key={candidate.key} className={css.selectedRow}>
-                      <span className={css.order}>{index + 1}</span>
-                      <span className={css.selectedText}>
-                        <span className={css.modelName}>{candidate.modelName}</span>
-                        <span className={css.route}>{`${candidate.providerName} · ${candidate.provider}/${candidate.model}`}</span>
-                      </span>
-                      <select
-                        className={css.effort}
-                        aria-label={`${t('reasoningEffort')}: ${candidate.modelName}`}
-                        title={candidate.reasoning === undefined
-                          ? t('reasoningUnavailable')
-                          : routeDefaultLabel(candidate) ?? t('reasoningFollowPurpose')}
-                        value={candidate.reasoningEffort ?? ''}
-                        disabled={disabled || saving || candidate.reasoning === undefined}
-                        onChange={(event) => setModelEffort(index, event.target.value === '' ? undefined : event.target.value)}
+            {shelfStatus === 'ready' && shelfListingError !== '' ? (
+              <p className={css.notice} role="status">{t('shelfListingFailed', { message: shelfListingError })}</p>
+            ) : null}
+            {shelfStatus === 'ready' && shelfListingError === '' && chosen !== undefined && (!chosen.listed || !chosen.connected) ? (
+              <p className={css.warning} role="status">{t(chosen.listed ? 'shelfDisconnectedWarning' : 'shelfNotListedWarning', { shelf: chosen.name })}</p>
+            ) : null}
+            <p className={css.hint}>{t('shelfHint')}</p>
+          </div>
+
+          <section className={css.group} aria-labelledby="ham-consolidation-title">
+            <h3 id="ham-consolidation-title" className={css.groupTitle}>{t('consolidationTitle')}</h3>
+            <p className={css.hint}>{t('modelSelectionHint')}</p>
+
+            <div className={css.modelSelection}>
+              {catalogStatus === 'loading' ? <p className={css.notice} role="status">{t('modelCatalogLoading')}</p> : null}
+              {catalogStatus === 'error' ? (
+                <div className={css.catalogError} role="alert">
+                  <span>{t('modelCatalogFailed')}</span>
+                  <button type="button" disabled={saving} onClick={() => { void loadCatalog() }}>{t('retry')}</button>
+                </div>
+              ) : null}
+              {catalogPartial ? <p className={css.notice}>{t('modelCatalogPartial')}</p> : null}
+              {candidates.length > 0 ? (
+                <>
+                  <fieldset className={css.models}>
+                    <legend>{t('selectedModels')}</legend>
+                    {selectedModels.length === 0 ? (
+                      <p className={css.notice}>{t('selectedModelsEmpty')}</p>
+                    ) : selectedModels.map((candidate, index) => (
+                      <div key={candidate.key} className={css.selectedRow}>
+                        <span className={css.order}>{index + 1}</span>
+                        <span className={css.selectedText}>
+                          <span className={css.modelName}>{candidate.modelName}</span>
+                          <span className={css.route}>{`${candidate.providerName} · ${candidate.provider}/${candidate.model}`}</span>
+                        </span>
+                        <select
+                          className={css.effort}
+                          aria-label={`${t('reasoningEffort')}: ${candidate.modelName}`}
+                          title={candidate.reasoning === undefined
+                            ? t('reasoningUnavailable')
+                            : routeDefaultLabel(candidate) ?? t('reasoningFollowPurpose')}
+                          value={candidate.reasoningEffort ?? ''}
+                          disabled={disabled || saving || candidate.reasoning === undefined}
+                          onChange={(event) => setModelEffort(index, event.target.value === '' ? undefined : event.target.value)}
+                        >
+                          {reasoningEffortChoices(candidate.reasoning, candidate.reasoningEffort).map(choice => (
+                            <option key={choice.key} value={choice.effort ?? ''}>{effortChoiceLabel(choice)}</option>
+                          ))}
+                        </select>
+                        {!candidate.available ? <span className={css.unavailable}>{t('modelUnavailable')}</span> : null}
+                        <span className={css.rowActions}>
+                          <button
+                            type="button"
+                            className={css.move}
+                            title={t('moveUp')}
+                            aria-label={`${t('moveUp')}: ${candidate.modelName}`}
+                            disabled={disabled || saving || index === 0}
+                            onClick={() => moveModel(index, index - 1)}
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            className={css.move}
+                            title={t('moveDown')}
+                            aria-label={`${t('moveDown')}: ${candidate.modelName}`}
+                            disabled={disabled || saving || index === selectedModels.length - 1}
+                            onClick={() => moveModel(index, index + 1)}
+                          >
+                            ↓
+                          </button>
+                          <button
+                            type="button"
+                            className={css.move}
+                            title={t('remove')}
+                            aria-label={`${t('remove')}: ${candidate.modelName}`}
+                            disabled={disabled || saving}
+                            onClick={() => toggleModel(candidate)}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      </div>
+                    ))}
+                  </fieldset>
+
+                  <fieldset className={css.models}>
+                    <legend>{t('availableModels')}</legend>
+                    {[...availableGroups].map(([provider, group]) => (
+                      <div key={provider} className={css.modelGroup}>
+                        <div className={css.providerName}>{group.providerName}</div>
+                        {group.candidates.map(renderCandidate)}
+                      </div>
+                    ))}
+                    {unavailable.length > 0 ? (
+                      <div className={css.modelGroup}>
+                        <div className={css.providerName}>{t('unavailableModels')}</div>
+                        {unavailable.map(renderCandidate)}
+                      </div>
+                    ) : null}
+                  </fieldset>
+                </>
+              ) : catalogStatus === 'ready' ? <p className={css.notice}>{t('modelCatalogEmpty')}</p> : null}
+              <p className={css.hint}>{t('reasoningBudgetHint')}</p>
+            </div>
+
+            <div className={css.pairedFields}>
+              <div className={css.field}>
+                <div className={css.fieldHead}>
+                  <label className={css.label} htmlFor="ham-checkEveryTurns">{t('checkEveryTurns')}</label>
+                  {consolidation.checkEveryTurns !== (base.consolidation?.checkEveryTurns ?? DEFAULT_CONSOLIDATION.checkEveryTurns) ? (
+                    <button
+                      type="button"
+                      className={css.reset}
+                      disabled={disabled}
+                      onClick={() => updateConsolidation({ checkEveryTurns: base.consolidation?.checkEveryTurns ?? DEFAULT_CONSOLIDATION.checkEveryTurns })}
+                    >
+                      {t('reset')}
+                    </button>
+                  ) : null}
+                </div>
+                <Input
+                  id="ham-checkEveryTurns"
+                  className={css.input}
+                  type="number"
+                  min={1}
+                  value={consolidation.checkEveryTurns}
+                  disabled={disabled}
+                  onChange={(event) => updateConsolidation({ checkEveryTurns: Number(event.target.value) })}
+                />
+              </div>
+              <div className={css.field}>
+                <div className={css.fieldHead}>
+                  <label className={css.label} htmlFor="ham-minNewTokens">{t('minNewTokens')}</label>
+                  {consolidation.minNewTokens !== (base.consolidation?.minNewTokens ?? DEFAULT_CONSOLIDATION.minNewTokens) ? (
+                    <button
+                      type="button"
+                      className={css.reset}
+                      disabled={disabled}
+                      onClick={() => updateConsolidation({ minNewTokens: base.consolidation?.minNewTokens ?? DEFAULT_CONSOLIDATION.minNewTokens })}
+                    >
+                      {t('reset')}
+                    </button>
+                  ) : null}
+                </div>
+                <Input
+                  id="ham-minNewTokens"
+                  className={css.input}
+                  type="number"
+                  min={0}
+                  value={consolidation.minNewTokens}
+                  disabled={disabled}
+                  onChange={(event) => updateConsolidation({ minNewTokens: Number(event.target.value) })}
+                />
+              </div>
+            </div>
+
+            <div className={css.pairedFields}>
+              <div className={css.field}>
+                <div className={css.fieldHead}>
+                  <label className={css.label} htmlFor="ham-cascadeBatchSize">{t('cascadeBatchSize')}</label>
+                  {(consolidation.cascade?.batchSize ?? DEFAULT_CONSOLIDATION.cascade.batchSize)
+                    !== (base.consolidation?.cascade?.batchSize ?? DEFAULT_CONSOLIDATION.cascade.batchSize) ? (
+                      <button
+                        type="button"
+                        className={css.reset}
+                        disabled={disabled}
+                        onClick={() => updateConsolidation({
+                          cascade: {
+                            ...(consolidation.cascade ?? DEFAULT_CONSOLIDATION.cascade),
+                            batchSize: base.consolidation?.cascade?.batchSize ?? DEFAULT_CONSOLIDATION.cascade.batchSize,
+                          },
+                        })}
                       >
-                        {reasoningEffortChoices(candidate.reasoning, candidate.reasoningEffort).map(choice => (
-                          <option key={choice.key} value={choice.effort ?? ''}>{effortChoiceLabel(choice)}</option>
-                        ))}
-                      </select>
-                      {!candidate.available ? <span className={css.unavailable}>{t('modelUnavailable')}</span> : null}
-                      <span className={css.rowActions}>
-                        <button
-                          type="button"
-                          className={css.move}
-                          title={t('moveUp')}
-                          aria-label={`${t('moveUp')}: ${candidate.modelName}`}
-                          disabled={disabled || saving || index === 0}
-                          onClick={() => moveModel(index, index - 1)}
-                        >
-                          ↑
-                        </button>
-                        <button
-                          type="button"
-                          className={css.move}
-                          title={t('moveDown')}
-                          aria-label={`${t('moveDown')}: ${candidate.modelName}`}
-                          disabled={disabled || saving || index === selectedModels.length - 1}
-                          onClick={() => moveModel(index, index + 1)}
-                        >
-                          ↓
-                        </button>
-                        <button
-                          type="button"
-                          className={css.move}
-                          title={t('remove')}
-                          aria-label={`${t('remove')}: ${candidate.modelName}`}
-                          disabled={disabled || saving}
-                          onClick={() => toggleModel(candidate)}
-                        >
-                          ×
-                        </button>
-                      </span>
-                    </div>
-                  ))}
-                </fieldset>
-
-                <fieldset className={css.models}>
-                  <legend>{t('availableModels')}</legend>
-                  {[...availableGroups].map(([provider, group]) => (
-                    <div key={provider} className={css.modelGroup}>
-                      <div className={css.providerName}>{group.providerName}</div>
-                      {group.candidates.map(renderCandidate)}
-                    </div>
-                  ))}
-                  {unavailable.length > 0 ? (
-                    <div className={css.modelGroup}>
-                      <div className={css.providerName}>{t('unavailableModels')}</div>
-                      {unavailable.map(renderCandidate)}
-                    </div>
-                  ) : null}
-                </fieldset>
-              </>
-            ) : catalogStatus === 'ready' ? <p className={css.notice}>{t('modelCatalogEmpty')}</p> : null}
-            <p className={css.hint}>{t('reasoningBudgetHint')}</p>
-          </div>
-
-          <div className={css.pairedFields}>
-            <div className={css.field}>
-              <div className={css.fieldHead}>
-                <label className={css.label} htmlFor="ham-checkEveryTurns">{t('checkEveryTurns')}</label>
-                {consolidation.checkEveryTurns !== (base.consolidation?.checkEveryTurns ?? DEFAULT_CONSOLIDATION.checkEveryTurns) ? (
-                  <button
-                    type="button"
-                    className={css.reset}
-                    disabled={disabled}
-                    onClick={() => updateConsolidation({ checkEveryTurns: base.consolidation?.checkEveryTurns ?? DEFAULT_CONSOLIDATION.checkEveryTurns })}
-                  >
-                    {t('reset')}
-                  </button>
-                ) : null}
+                        {t('reset')}
+                      </button>
+                    ) : null}
+                </div>
+                <Input
+                  id="ham-cascadeBatchSize"
+                  className={css.input}
+                  type="number"
+                  min={2}
+                  value={consolidation.cascade?.batchSize ?? DEFAULT_CONSOLIDATION.cascade.batchSize}
+                  disabled={disabled}
+                  onChange={(event) => updateConsolidation({
+                    cascade: {
+                      ...(consolidation.cascade ?? DEFAULT_CONSOLIDATION.cascade),
+                      batchSize: Number(event.target.value),
+                    },
+                  })}
+                />
               </div>
-              <Input
-                id="ham-checkEveryTurns"
-                className={css.input}
-                type="number"
-                min={1}
-                value={consolidation.checkEveryTurns}
-                disabled={disabled}
-                onChange={(event) => updateConsolidation({ checkEveryTurns: Number(event.target.value) })}
-              />
-            </div>
-            <div className={css.field}>
-              <div className={css.fieldHead}>
-                <label className={css.label} htmlFor="ham-minNewTokens">{t('minNewTokens')}</label>
-                {consolidation.minNewTokens !== (base.consolidation?.minNewTokens ?? DEFAULT_CONSOLIDATION.minNewTokens) ? (
-                  <button
-                    type="button"
-                    className={css.reset}
-                    disabled={disabled}
-                    onClick={() => updateConsolidation({ minNewTokens: base.consolidation?.minNewTokens ?? DEFAULT_CONSOLIDATION.minNewTokens })}
-                  >
-                    {t('reset')}
-                  </button>
-                ) : null}
+              <div className={css.field}>
+                <div className={css.fieldHead}>
+                  <label className={css.label} htmlFor="ham-dedupMaxDistance">{t('dedupMaxDistance')}</label>
+                  {(consolidation.dedupMaxDistance ?? DEFAULT_CONSOLIDATION.dedupMaxDistance)
+                    !== (base.consolidation?.dedupMaxDistance ?? DEFAULT_CONSOLIDATION.dedupMaxDistance) ? (
+                      <button
+                        type="button"
+                        className={css.reset}
+                        disabled={disabled}
+                        onClick={() => updateConsolidation({
+                          dedupMaxDistance: base.consolidation?.dedupMaxDistance ?? DEFAULT_CONSOLIDATION.dedupMaxDistance,
+                        })}
+                      >
+                        {t('reset')}
+                      </button>
+                    ) : null}
+                </div>
+                <Input
+                  id="ham-dedupMaxDistance"
+                  className={css.input}
+                  type="number"
+                  min={0}
+                  step={0.05}
+                  value={consolidation.dedupMaxDistance ?? DEFAULT_CONSOLIDATION.dedupMaxDistance}
+                  disabled={disabled}
+                  onChange={(event) => updateConsolidation({ dedupMaxDistance: Number(event.target.value) })}
+                />
               </div>
-              <Input
-                id="ham-minNewTokens"
-                className={css.input}
-                type="number"
-                min={0}
-                value={consolidation.minNewTokens}
-                disabled={disabled}
-                onChange={(event) => updateConsolidation({ minNewTokens: Number(event.target.value) })}
-              />
             </div>
-          </div>
+            <p className={css.hint}>{t('cascadeHint')}</p>
 
-          <div className={css.pairedFields}>
-            <div className={css.field}>
-              <div className={css.fieldHead}>
-                <label className={css.label} htmlFor="ham-cascadeBatchSize">{t('cascadeBatchSize')}</label>
-                {(consolidation.cascade?.batchSize ?? DEFAULT_CONSOLIDATION.cascade.batchSize)
-                  !== (base.consolidation?.cascade?.batchSize ?? DEFAULT_CONSOLIDATION.cascade.batchSize) ? (
+            <h4 className={css.limitsTitle}>{t('limitsTitle')}</h4>
+            <p className={css.hint}>{t('limitsHint')}</p>
+            <div className={css.pairedFields}>
+              <div className={css.field}>
+                <div className={css.fieldHead}>
+                  <label className={css.label} htmlFor="ham-maxInputTokens">{t('maxInputTokens')}</label>
+                  {consolidation.maxInputTokens !== (base.consolidation?.maxInputTokens ?? DEFAULT_CONSOLIDATION.maxInputTokens) ? (
                     <button
                       type="button"
                       className={css.reset}
                       disabled={disabled}
-                      onClick={() => updateConsolidation({
-                        cascade: {
-                          ...(consolidation.cascade ?? DEFAULT_CONSOLIDATION.cascade),
-                          batchSize: base.consolidation?.cascade?.batchSize ?? DEFAULT_CONSOLIDATION.cascade.batchSize,
-                        },
-                      })}
+                      onClick={() => updateConsolidation({ maxInputTokens: base.consolidation?.maxInputTokens ?? DEFAULT_CONSOLIDATION.maxInputTokens })}
                     >
                       {t('reset')}
                     </button>
                   ) : null}
+                </div>
+                <Input
+                  id="ham-maxInputTokens"
+                  className={css.input}
+                  type="number"
+                  min={1000}
+                  step={1000}
+                  value={consolidation.maxInputTokens}
+                  disabled={disabled}
+                  onChange={(event) => updateConsolidation({ maxInputTokens: Number(event.target.value) })}
+                />
               </div>
-              <Input
-                id="ham-cascadeBatchSize"
-                className={css.input}
-                type="number"
-                min={2}
-                value={consolidation.cascade?.batchSize ?? DEFAULT_CONSOLIDATION.cascade.batchSize}
-                disabled={disabled}
-                onChange={(event) => updateConsolidation({
-                  cascade: {
-                    ...(consolidation.cascade ?? DEFAULT_CONSOLIDATION.cascade),
-                    batchSize: Number(event.target.value),
-                  },
-                })}
-              />
-            </div>
-            <div className={css.field}>
-              <div className={css.fieldHead}>
-                <label className={css.label} htmlFor="ham-dedupMaxDistance">{t('dedupMaxDistance')}</label>
-                {(consolidation.dedupMaxDistance ?? DEFAULT_CONSOLIDATION.dedupMaxDistance)
-                  !== (base.consolidation?.dedupMaxDistance ?? DEFAULT_CONSOLIDATION.dedupMaxDistance) ? (
+              <div className={css.field}>
+                <div className={css.fieldHead}>
+                  <label className={css.label} htmlFor="ham-maxOutputTokens">{t('maxOutputTokens')}</label>
+                  {consolidation.maxOutputTokens !== (base.consolidation?.maxOutputTokens ?? DEFAULT_CONSOLIDATION.maxOutputTokens) ? (
                     <button
                       type="button"
                       className={css.reset}
                       disabled={disabled}
-                      onClick={() => updateConsolidation({
-                        dedupMaxDistance: base.consolidation?.dedupMaxDistance ?? DEFAULT_CONSOLIDATION.dedupMaxDistance,
-                      })}
+                      onClick={() => updateConsolidation({ maxOutputTokens: base.consolidation?.maxOutputTokens ?? DEFAULT_CONSOLIDATION.maxOutputTokens })}
                     >
                       {t('reset')}
                     </button>
                   ) : null}
+                </div>
+                <Input
+                  id="ham-maxOutputTokens"
+                  className={css.input}
+                  type="number"
+                  min={200}
+                  step={200}
+                  value={consolidation.maxOutputTokens}
+                  disabled={disabled}
+                  onChange={(event) => updateConsolidation({ maxOutputTokens: Number(event.target.value) })}
+                />
               </div>
-              <Input
-                id="ham-dedupMaxDistance"
-                className={css.input}
-                type="number"
-                min={0}
-                step={0.05}
-                value={consolidation.dedupMaxDistance ?? DEFAULT_CONSOLIDATION.dedupMaxDistance}
-                disabled={disabled}
-                onChange={(event) => updateConsolidation({ dedupMaxDistance: Number(event.target.value) })}
-              />
+              <div className={css.field}>
+                <div className={css.fieldHead}>
+                  <label className={css.label} htmlFor="ham-maxWorkUnitsPerRun">{t('maxWorkUnitsPerRun')}</label>
+                  {consolidation.maxWorkUnitsPerRun !== (base.consolidation?.maxWorkUnitsPerRun ?? DEFAULT_CONSOLIDATION.maxWorkUnitsPerRun) ? (
+                    <button
+                      type="button"
+                      className={css.reset}
+                      disabled={disabled}
+                      onClick={() => updateConsolidation({ maxWorkUnitsPerRun: base.consolidation?.maxWorkUnitsPerRun ?? DEFAULT_CONSOLIDATION.maxWorkUnitsPerRun })}
+                    >
+                      {t('reset')}
+                    </button>
+                  ) : null}
+                </div>
+                <Input
+                  id="ham-maxWorkUnitsPerRun"
+                  className={css.input}
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={consolidation.maxWorkUnitsPerRun}
+                  disabled={disabled}
+                  onChange={(event) => updateConsolidation({ maxWorkUnitsPerRun: Number(event.target.value) })}
+                />
+              </div>
             </div>
+          </section>
+
+          <div className={css.field}>
+            <div className={css.fieldHead}>
+              <span className={css.label}>{t('recallPreload')}</span>
+              {(recall.preloadRulesTaboos ?? true) !== (base.recall?.preloadRulesTaboos ?? true) ? (
+                <button
+                  type="button"
+                  className={css.reset}
+                  disabled={disabled}
+                  onClick={() => setDraft((current) => ({
+                    ...current,
+                    recall: {
+                      ...(current.recall ?? { preloadRulesTaboos: true }),
+                      preloadRulesTaboos: base.recall?.preloadRulesTaboos ?? true,
+                    },
+                  }))}
+                >
+                  {t('reset')}
+                </button>
+              ) : null}
+            </div>
+            <Switch
+              checked={recall.preloadRulesTaboos ?? true}
+              label={t('recallPreload')}
+              disabled={disabled}
+              onChange={(preloadRulesTaboos) => setDraft((current) => ({
+                ...current,
+                recall: { ...(current.recall ?? { preloadRulesTaboos: true }), preloadRulesTaboos },
+              }))}
+            />
           </div>
-          <p className={css.hint}>{t('cascadeHint')}</p>
 
-          <h4 className={css.limitsTitle}>{t('limitsTitle')}</h4>
-          <p className={css.hint}>{t('limitsHint')}</p>
-          <div className={css.pairedFields}>
-            <div className={css.field}>
-              <div className={css.fieldHead}>
-                <label className={css.label} htmlFor="ham-maxInputTokens">{t('maxInputTokens')}</label>
-                {consolidation.maxInputTokens !== (base.consolidation?.maxInputTokens ?? DEFAULT_CONSOLIDATION.maxInputTokens) ? (
-                  <button
-                    type="button"
-                    className={css.reset}
-                    disabled={disabled}
-                    onClick={() => updateConsolidation({ maxInputTokens: base.consolidation?.maxInputTokens ?? DEFAULT_CONSOLIDATION.maxInputTokens })}
-                  >
-                    {t('reset')}
-                  </button>
-                ) : null}
-              </div>
-              <Input
-                id="ham-maxInputTokens"
-                className={css.input}
-                type="number"
-                min={1000}
-                step={1000}
-                value={consolidation.maxInputTokens}
-                disabled={disabled}
-                onChange={(event) => updateConsolidation({ maxInputTokens: Number(event.target.value) })}
-              />
-            </div>
-            <div className={css.field}>
-              <div className={css.fieldHead}>
-                <label className={css.label} htmlFor="ham-maxOutputTokens">{t('maxOutputTokens')}</label>
-                {consolidation.maxOutputTokens !== (base.consolidation?.maxOutputTokens ?? DEFAULT_CONSOLIDATION.maxOutputTokens) ? (
-                  <button
-                    type="button"
-                    className={css.reset}
-                    disabled={disabled}
-                    onClick={() => updateConsolidation({ maxOutputTokens: base.consolidation?.maxOutputTokens ?? DEFAULT_CONSOLIDATION.maxOutputTokens })}
-                  >
-                    {t('reset')}
-                  </button>
-                ) : null}
-              </div>
-              <Input
-                id="ham-maxOutputTokens"
-                className={css.input}
-                type="number"
-                min={200}
-                step={200}
-                value={consolidation.maxOutputTokens}
-                disabled={disabled}
-                onChange={(event) => updateConsolidation({ maxOutputTokens: Number(event.target.value) })}
-              />
-            </div>
-            <div className={css.field}>
-              <div className={css.fieldHead}>
-                <label className={css.label} htmlFor="ham-maxWorkUnitsPerRun">{t('maxWorkUnitsPerRun')}</label>
-                {consolidation.maxWorkUnitsPerRun !== (base.consolidation?.maxWorkUnitsPerRun ?? DEFAULT_CONSOLIDATION.maxWorkUnitsPerRun) ? (
-                  <button
-                    type="button"
-                    className={css.reset}
-                    disabled={disabled}
-                    onClick={() => updateConsolidation({ maxWorkUnitsPerRun: base.consolidation?.maxWorkUnitsPerRun ?? DEFAULT_CONSOLIDATION.maxWorkUnitsPerRun })}
-                  >
-                    {t('reset')}
-                  </button>
-                ) : null}
-              </div>
-              <Input
-                id="ham-maxWorkUnitsPerRun"
-                className={css.input}
-                type="number"
-                min={1}
-                max={10}
-                value={consolidation.maxWorkUnitsPerRun}
-                disabled={disabled}
-                onChange={(event) => updateConsolidation({ maxWorkUnitsPerRun: Number(event.target.value) })}
-              />
-            </div>
-          </div>
-        </section>
-
-        <div className={css.field}>
-          <div className={css.fieldHead}>
-            <label className={css.label} htmlFor="ham-preloadRulesTaboos">{t('recallPreload')}</label>
-            {(recall.preloadRulesTaboos ?? true) !== (base.recall?.preloadRulesTaboos ?? true) ? (
-              <button
-                type="button"
-                className={css.reset}
-                disabled={disabled}
-                onClick={() => setDraft((current) => ({
-                  ...current,
-                  recall: {
-                    ...(current.recall ?? { preloadRulesTaboos: true }),
-                    preloadRulesTaboos: base.recall?.preloadRulesTaboos ?? true,
-                  },
-                }))}
-              >
-                {t('reset')}
-              </button>
-            ) : null}
-          </div>
-          <button
-            id="ham-preloadRulesTaboos"
-            type="button"
-            role="switch"
-            aria-checked={recall.preloadRulesTaboos ?? true}
-            aria-label={t('recallPreload')}
-            className={`${css.switch} ${recall.preloadRulesTaboos ?? true ? css.switchOn : ''}`}
-            disabled={disabled}
-            onClick={() => setDraft((current) => ({
-              ...current,
-              recall: {
-                ...(current.recall ?? { preloadRulesTaboos: true }),
-                preloadRulesTaboos: !(current.recall?.preloadRulesTaboos ?? true),
-              },
-            }))}
-          >
-            <span className={css.switchThumb} />
-          </button>
-        </div>
-
-        <p className={css.advancedHint}>{t('advancedHint', { ns: NS })}</p>
-        {error ? <p className={css.error} role="status">{t('saveFailed', { message: error })}</p> : null}
-
-        <div className={css.footer}>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={!dirty || saving}
-            onClick={discard}
-          >
-            {t('discard')}
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            disabled={saveBlocked}
-            onClick={save}
-          >
-            {saving ? t('saving') : t('save')}
-          </Button>
-        </div>
+          <p className={css.advancedHint}>{t('advancedHint', { ns: NS })}</p>
+        </SettingsForm>
       </div>
     </section>
   )

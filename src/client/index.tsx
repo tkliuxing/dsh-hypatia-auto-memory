@@ -26,7 +26,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { createElement } from 'react'
 import { SettingsCard } from './SettingsCard'
-import type { ConfigShape } from './SettingsCard'
+import type { ConfigShape, SettingsCardSeat } from './SettingsCard'
 import type { LoadConsolidationModelCatalog } from './consolidation-models'
 import { MemoryView } from './MemoryView'
 import { fetchMemory, fetchShelves, summarizeMemory } from './memory-client'
@@ -92,10 +92,14 @@ export function apply(ctx: Context): void {
   // settings document only projects plugin Config forms, so the read-only
   // inventory namespace this used to ride can no longer be published.
   const loadShelfInventory: LoadShelfInventory = fetchShelves
-  const renderCard = (props: PropsLocale<typeof NS>) => createElement(SettingsCard, {
+  // Each seat gets its own card instance: the Plugins page names the bundle
+  // above the card and starts it folded, while the Settings tab is the plugin's
+  // whole page and carries its name.
+  const renderCard = (seat: SettingsCardSeat) => (props: PropsLocale<typeof NS>) => createElement(SettingsCard, {
     scope: form,
     loadModelCatalog,
     loadShelfInventory,
+    seat,
     ...props,
   })
   // The card exists only while the Host serves our namespace; whileServed owns
@@ -106,11 +110,11 @@ export function apply(ctx: Context): void {
     installPluginCard(ctx, {
       official: () => ctx.slots.register(
         { name: BUNDLE_CONFIG_SEAT, key: BUNDLE_NAME, locale: NS },
-        renderCard,
+        renderCard('official'),
       ),
       settingsTab: () => ctx.slots.register(
         { name: SETTINGS_TAB_SEAT, id: NS, label: () => t('title'), locale: NS },
-        renderCard,
+        renderCard('settings-tab'),
       ),
       onRefused: (seat, error) => {
         console.warn(`[${BUNDLE_NAME}] configuration card refused by slot "${seat}"`, error)

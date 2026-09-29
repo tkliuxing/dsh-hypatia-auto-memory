@@ -1,22 +1,75 @@
 /*
- * Bundle-local implementation of the DSH plugin-settings card treatment. The
- * card fills its own tab under Settings → Plugins, so it is a plain panel:
- * always expanded, no list-item or accordion chrome.
+ * Bundle-local wrapper around the shared settings form: the disclosure that
+ * holds the form plus the fields this plugin draws itself. The form frame,
+ * its fields, its save and its read-only notice are the harness's own
+ * (`SettingsForm`, `SettingsValueField`, `Switch`), so this file carries only
+ * what is specific to this card: the disclosure header, the fieldset the model
+ * priority editor needs, and the spacing between them.
  */
 
 .card {
   border: 0.5px solid var(--dsw-alias-border-l4);
-  border-radius: 16px;
+  border-radius: var(--dsw-radius-lg);
   background: var(--dsw-alias-bg-layer-2);
+  /* Anything that scrolls inside a card draws the l2 thumb
+     (ui-theme styles/scrollbar.css rebinding contract). */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
 }
 
 .header {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 14px 16px;
+  padding: 12px 16px;
 }
 
+/* The card's whole header is the disclosure control; the state pill beside it
+   is not part of the hit area. */
+.toggle {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.toggle:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+
+.toggle > .chevron {
+  transform: rotate(-90deg);
+}
+
+.toggle[aria-expanded='true'] > .chevron {
+  transform: none;
+}
+
+.chevron {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* The head beside the page's own title, matching the component list's heading
+   below it. */
+.sectionName {
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+}
+
+/* On the Settings fallback tab the card is the plugin's whole page, so it
+   carries the plugin's own name and one-liner. */
 .headText {
   display: flex;
   flex: 1;
@@ -27,9 +80,9 @@
 
 .name {
   color: var(--dsw-alias-label-primary);
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 1.4;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
 }
 
 .description {
@@ -38,17 +91,26 @@
   line-height: 1.5;
 }
 
-.pending {
+.pending,
+.failedPill {
   flex: none;
   border-radius: 999px;
   corner-shape: round;
   background: var(--dsw-alias-bg-module-platform);
-  color: var(--dsw-alias-label-secondary);
   font-size: 11px;
   font-weight: 500;
   line-height: 17px;
   padding: 1px 8px;
   white-space: nowrap;
+}
+
+.pending {
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* Shown in the collapsed header so a failed save is not hidden by the fold. */
+.failedPill {
+  color: var(--dsw-alias-state-error-primary);
 }
 
 .body {
@@ -57,18 +119,21 @@
   padding-bottom: 8px;
 }
 
+/* The form stays mounted while collapsed (a staged edit survives the fold), so
+   the fold is a visibility change rather than an unmount. */
+.body[hidden] {
+  display: none;
+}
+
 .status,
-.readOnly,
 .hint,
-.advancedHint,
-.error {
+.advancedHint {
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
 }
 
 .status,
-.readOnly,
 .hint,
 .advancedHint {
   color: var(--dsw-alias-label-tertiary);
@@ -78,18 +143,18 @@
   padding: 12px 16px;
 }
 
-.readOnly {
-  padding-top: 12px;
-}
-
 .field {
   display: grid;
   gap: 6px;
   padding: 12px 0;
 }
 
-.body > .field + .group,
-.body > .group + .field {
+/* The card draws its own separators between the blocks it stacks, the way the
+   shared field group draws them between its own children (every adjacent pair,
+   not only the ones around the group). */
+.field + .field,
+.field + .group,
+.group + .field {
   border-top: 0.5px solid var(--dsw-alias-border-l2);
 }
 
@@ -119,11 +184,6 @@
   margin-top: 4px;
 }
 
-.group > .field:first-of-type {
-  padding-top: 12px;
-}
-
-.group > .field + .field,
 .pairedFields {
   border-top: 0.5px solid var(--dsw-alias-border-l2);
 }
@@ -175,7 +235,7 @@
   min-width: 0;
   height: 32px;
   border: 0.5px solid var(--dsw-alias-border-l3);
-  border-radius: 8px;
+  border-radius: var(--dsw-radius-sm);
   background: transparent;
   color: var(--dsw-alias-label-primary);
   font: inherit;
@@ -188,13 +248,13 @@
 }
 
 .select:focus-visible {
-  outline: 2px solid var(--dsw-alias-brand-primary);
-  outline-offset: 2px;
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 1px;
 }
 
 .warning {
   margin: 0;
-  color: var(--dsw-alias-label-error);
+  color: var(--dsw-alias-state-error-primary);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -209,46 +269,6 @@
 
 .pairedFields .field {
   min-width: 0;
-}
-
-.switch {
-  box-sizing: border-box;
-  position: relative;
-  width: 36px;
-  height: 20px;
-  border: 0;
-  border-radius: 10px;
-  background: var(--dsw-alias-border-l3);
-  cursor: pointer;
-  padding: 2px;
-}
-
-.switchOn {
-  background: var(--dsw-alias-brand-primary);
-}
-
-.switch:disabled {
-  cursor: default;
-  opacity: 0.5;
-}
-
-.switch:focus-visible {
-  outline: 2px solid var(--dsw-alias-brand-primary);
-  outline-offset: 2px;
-}
-
-.switchThumb {
-  display: block;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  corner-shape: round;
-  background: var(--dsw-alias-label-primary-foreground);
-  transition: transform 120ms ease;
-}
-
-.switchOn .switchThumb {
-  transform: translateX(16px);
 }
 
 .modelSelection {
@@ -269,7 +289,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  color: var(--dsw-alias-label-error);
+  color: var(--dsw-alias-state-error-primary);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -283,6 +303,12 @@
   padding: 0;
 }
 
+.catalogError button:focus-visible,
+.reset:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 1px;
+}
+
 .models {
   display: grid;
   min-width: 0;
@@ -292,7 +318,7 @@
   padding: 10px;
   overflow: auto;
   border: 0.5px solid var(--dsw-alias-border-l4);
-  border-radius: 8px;
+  border-radius: var(--dsw-radius-sm);
 }
 
 .models legend {
@@ -325,7 +351,7 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
-  border-radius: 6px;
+  border-radius: var(--dsw-radius-xs);
   cursor: pointer;
   padding: 6px;
 }
@@ -341,7 +367,7 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
-  border-radius: 6px;
+  border-radius: var(--dsw-radius-xs);
   padding: 6px;
 }
 
@@ -383,8 +409,8 @@
 }
 
 .effort:focus-visible {
-  border-color: var(--dsw-alias-brand-primary);
-  outline: none;
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 1px;
 }
 
 .rowActions {
@@ -417,6 +443,11 @@
   opacity: 0.4;
 }
 
+.move:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 1px;
+}
+
 .modelName,
 .route {
   display: block;
@@ -441,22 +472,9 @@
   font-size: 11px;
 }
 
-.error {
-  color: var(--dsw-alias-label-error);
-}
-
 .advancedHint {
   border-top: 0.5px solid var(--dsw-alias-border-l2);
   padding-top: 12px;
-}
-
-.footer {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  border-top: 0.5px solid var(--dsw-alias-border-l2);
-  padding: 12px 0 4px;
 }
 
 @media (max-width: 480px) {
