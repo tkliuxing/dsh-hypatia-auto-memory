@@ -32,7 +32,7 @@ test('formatSpan renders user and assistant messages with policy applied', () =>
 
 test('formatSpan skips plugin-sourced user messages', () => {
   const events = [
-    ev('user/message', 1, { source: { kind: 'plugin', plugin: 'recall' }, content: [{ type: 'text', text: 'ref' }] }),
+    ev('user/message', 1, { source: { kind: 'plugin:dsh-hypatia-auto-memory', plugin: 'dsh-hypatia-auto-memory' }, content: [{ type: 'text', text: 'ref' }] }),
   ]
   assert.equal(formatSpan(events, { now: NOW }).length, 0)
 })
@@ -104,7 +104,7 @@ test('message ordinals are dense, and skip everything that is not a logged messa
     ev('assistant/chunk', 3, { turn: 1, chunk: {} }),
     ev('assistant/message', 4, { turn: 1, message: { content: [{ type: 'text', text: 'b' }] } }),
     // Plugin-injected context is not a human message and must not take an ordinal.
-    ev('user/message', 5, { source: { kind: 'plugin', plugin: 'x' }, content: [{ type: 'text', text: 'ctx' }] }),
+    ev('user/message', 5, { source: { kind: 'plugin:x', plugin: 'x' }, content: [{ type: 'text', text: 'ctx' }] }),
     ev('tool/call', 6, { turn: 1, callId: 'c1', name: 'grep' }),
     ev('assistant/message', 7, { turn: 1, message: { content: [{ type: 'text', text: 'c' }] } }),
   ]
@@ -118,7 +118,7 @@ test('countLoggableMessages gives the ordinal a span continues from', () => {
     ev('user/message', 0, { source: { kind: 'user' }, content: [] }),
     ev('assistant/chunk', 1, {}),
     ev('assistant/message', 2, { turn: 1, message: { content: [{ type: 'text', text: 'a' }] } }),
-    ev('user/message', 3, { source: { kind: 'plugin', plugin: 'p' }, content: [] }),
+    ev('user/message', 3, { source: { kind: 'plugin:p', plugin: 'p' }, content: [] }),
   ]
   assert.equal(countLoggableMessages(prefix), 2)
   assert.equal(countLoggableMessages([]), 0)
@@ -142,7 +142,7 @@ test('isLoggableMessage is the single predicate both writers share', () => {
   assert.equal(isLoggableMessage(ev('assistant/message', 0, { message: { content: [{ type: 'reasoning', text: 'hmm' }] } })), false)
   assert.equal(isLoggableMessage(ev('assistant/message', 0, { message: { content: [{ type: 'reasoning', text: '' }, { type: 'text', text: 'hi' }] } })), true)
   assert.equal(isLoggableMessage(ev('user/message', 0, { source: { kind: 'user' } })), true)
-  assert.equal(isLoggableMessage(ev('user/message', 0, { source: { kind: 'plugin' } })), false)
+  assert.equal(isLoggableMessage(ev('user/message', 0, { source: { kind: 'plugin:p' } })), false)
   assert.equal(isLoggableMessage(ev('tool/result', 0, {})), false)
   assert.equal(isLoggableMessage(undefined), false)
 })

@@ -32,7 +32,7 @@
  * to another. That line is sent even with the preload switched off or nothing
  * to preload, because it is not a preference — without it retrieval is wrong.
  *
- * The seed carries `source: {kind: 'plugin', plugin, form: 'recall'}` so the
+ * The seed carries `source: {kind: 'plugin:<name>', plugin, form: 'recall'}` so the
  * collector skips it — recall output must never be re-logged into memory.
  *
  * @module dsh-hypatia-auto-memory/recall
@@ -132,7 +132,7 @@ export function createRecall({ ctx, cli, shelf = DEFAULT_SHELF, getConfig, statu
     if (taboosText !== '') sections.push('### Taboos', taboosText, '')
     agent.inject(createUserMessage({
       content: [{ type: 'text', text: sections.join('\n') }],
-      source: { kind: 'plugin', plugin: PLUGIN_NAME, form: 'recall' },
+      source: { kind: `plugin:${PLUGIN_NAME}`, plugin: PLUGIN_NAME, form: 'recall' },
     }))
   }
 

@@ -509,7 +509,7 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
         system: 'You produce strict JSON only. You never add prose around it.',
         messages: [createUserMessage({
           content: [{ type: 'text', text: instruction }],
-          source: { kind: 'plugin', plugin: PLUGIN_NAME },
+          source: { kind: `plugin:${PLUGIN_NAME}`, plugin: PLUGIN_NAME },
         })],
         maxTokens: budgetForEffort(ADJUDICATION_MAX_TOKENS, effort),
         ...effort === undefined ? {} : { reasoningEffort: effort },
@@ -731,7 +731,7 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
         assembler = new BlockAssembler()
         const request = createUserMessage({
           content: [{ type: 'text', text: `${consolidationInstruction(maxUnits)}\n\n<transcript>\n${transcript}\n</transcript>` }],
-          source: { kind: 'plugin', plugin: PLUGIN_NAME },
+          source: { kind: `plugin:${PLUGIN_NAME}`, plugin: PLUGIN_NAME },
         })
         // The purpose policy asks for no reasoning here and the adjudication
         // call above does the same: extraction is a mechanical transform into a

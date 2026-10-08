@@ -118,7 +118,7 @@ export function createCascade({ cli, llm, selectRoute, getConfig, status, modelL
         system: 'You produce strict JSON only. You never add prose around it.',
         messages: [createUserMessage({
           content: [{ type: 'text', text: `${archiveInstruction(level, rows.length)}\n\n${body}` }],
-          source: { kind: 'plugin', plugin: PLUGIN_NAME },
+          source: { kind: `plugin:${PLUGIN_NAME}`, plugin: PLUGIN_NAME },
         })],
         // Thinking stays ON by default here, unlike the extraction call: an
         // archive is a semantic compression of sixteen summaries, not a
