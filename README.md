@@ -9,7 +9,8 @@ cascade, and adjudicated work-unit extraction — all on a **dedicated model
 route**, with zero model work in the main session.
 
 Writing is automatic; **reading is the agent's job**, through the bundled
-`hypatia-memory` skill. That split is deliberate — see *Recall* below.
+`hypatia-memory` skill, with the bundled `smart-memory` preset carrying the
+retrieval discipline. That split is deliberate — see *Recall* below.
 
 **This plugin replaces `dsh-hypatia`.** That plugin left the writing to the
 agent, which in practice did not happen: in the deployment this one was written
@@ -85,6 +86,66 @@ does not have. Delete such a copy or move it out of the skills directory;
 renaming its directory in place is not enough, because DSH names a skill by its
 frontmatter `name`. The startup warning names the directory. The skill center shows the global view, so it can list this plugin
 as a skill's provider while sessions load the disk copy.
+
+## Agent preset: smart-memory（长程记忆）
+
+The bundle ships one agent preset. `cordis.patch.yml` inserts a
+`preset-smart-memory` row declaring `@deepseek-ai/dsh-agent-preset` with
+`config.id: smart-memory`, so the profile's bundle layer is what puts it in the
+agent-preset picker beside the shipped `standard`, `ptc` and `minimal`: install
+the plugin and a memory-first agent is available, with no hand-written profile
+patch.
+
+**It carries the reading half of the split, and nothing else.** Writing here is
+already automatic — logging, consolidation, the session seed. The preset carries
+the discipline the automatic layer cannot: *when* the agent must go and look
+(before planning, at every milestone, when an unfamiliar internal name or a
+familiar-looking bug shows up, before anything destructive — commit, push,
+delete or overwrite, config change, install or upgrade, migration, release —
+whenever the user refers to history, and periodically across a long run), the
+retrieval quality rules (query the concept rather than the user's words;
+`hypatia similar` for ideas and `hypatia search` for exact identifiers; always
+exclude the operational layer), and the one write rule no background pass can
+enforce: a durable rule, taboo or correction the user states is written
+immediately, as `knowledge-update` on an existing entry rather than
+delete-and-recreate.
+
+The persona states *when*; the `hypatia-memory` skill carries *how* — the
+commands, their flags, and the shelf and scope rules. The preset deliberately
+does not restate that protocol or mount it: it is a prompt, not a second
+provider, so load the skill when the work touches memory.
+
+**Tool set.** The `standard` roster with the plan-mode group and `present`
+removed (46 tools on a web profile). Its sub-plugins — `@deepseek-ai/dsh-persona`,
+the `dsh-tool-*` rows, `dsh-skill-filesystem` — come from the dsh installation
+and are deliberately **not** dependencies of this package; the launcher supplies
+them.
+
+**Nothing here mounts the plugin's own machinery.** The preset starts no second
+collector, consolidator, recall listener or auto-approval. Those belong to the
+`hypatia-auto-memory` row above and behave identically whichever preset a session
+runs under, so a session on this preset writes memory exactly like one on
+`standard`.
+
+**Selecting it.** Pick 长程记忆 in the new-session preset picker, or make it the
+default for a surface from the profile's own patch file:
+
+```yaml
+- id: agent-preset-registry
+  name: '@deepseek-ai/dsh-agent-preset-registry'
+  config:
+    selectedDefault: smart-memory
+```
+
+**Replacing a hand-written copy of it.** If you declared this preset yourself
+before it shipped here, delete that copy. The packaged row deliberately reuses
+the row id `preset-smart-memory`, and rows sharing a row id collapse to the later
+one — the profile's patch file is applied *after* every bundle layer, so a
+leftover copy wins and masks the packaged declaration, and the Plugin Manager
+then reports that row as `unaddressable` because its id has two candidate rows.
+Two *distinct* rows declaring one `config.id` fail the other way, with `Duplicate
+agent preset: smart-memory` from the registry. A comment where the row used to be
+is enough.
 
 ## How it works
 
@@ -666,7 +727,7 @@ Deliberate, and worth knowing before you rely on them:
 ```
 dsh-hypatia-auto-memory/
 ├── package.json          # bundle + client manifest, deps
-├── cordis.patch.yml      # bundle layer inserting id=hypatia-auto-memory
+├── cordis.patch.yml      # bundle layer: the plugin row + the smart-memory preset
 ├── tsconfig.json         # browser TS/TSX type-check config
 ├── tsconfig.build.json   # declaration emit for client bundle
 ├── tsdown.config.ts      # browser CJS factory build

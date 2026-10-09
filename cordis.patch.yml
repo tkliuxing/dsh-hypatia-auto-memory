@@ -21,3 +21,152 @@
 - insert:
     - id: hypatia-auto-memory
       name: dsh-hypatia-auto-memory
+
+# ── Agent preset: smart-memory（长程记忆） ─────────────────────────────────────
+# The plugin owns the memory *writing* side; this preset owns the *reading*
+# discipline. Installing this bundle therefore ships a memory-first agent — the
+# preset is part of the package, not a profile patch a user has to hand-write.
+# The two rows are independent: the preset mounts none of the plugin's own
+# machinery (collector, consolidation, recall, autoApprove), and the plugin row
+# above registers no preset.
+#
+# The row declares `@deepseek-ai/dsh-agent-preset` with `config.id: smart-memory`
+# — the id the preset registry and a session header record. Its `config.plugins`
+# is the `standard` preset's roster with the plan-mode group and `present`
+# removed, under a memory-first persona; the sub-plugins (`@deepseek-ai/dsh-persona`,
+# the `dsh-tool-*` rows, `dsh-skill-filesystem`) come from the dsh installation
+# and are deliberately not dependencies of this package.
+#
+# The row id is deliberately the one hand-written profile patches used
+# (`preset-smart-memory`), so such a profile only has to drop its copy. Rows
+# sharing a row id collapse to the later one, and the profile's own
+# cordis.patch.yml is applied after every bundle layer, so a leftover copy wins
+# and masks this declaration; the Plugin Manager also reports that row as
+# `unaddressable`, because its id then has two candidate rows. Two *distinct*
+# rows declaring one `config.id` are refused instead: the registry throws
+# `Duplicate agent preset: smart-memory` on the second registration.
+#
+# Edits saved from the Web preset editor override this row's `config.plugins`
+# by id from the profile patch.
+- insert:
+    - id: preset-smart-memory
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: smart-memory
+        name: 长程记忆
+        description: >-
+          长程任务下强化 hypatia 记忆库的主动检索与落库：任务开始、里程碑、 发现新线索、重要操作前都先回忆，永久规则与纠正立即写库。
+        order: 2
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                你是 {{model}} 驱动的长程记忆型编码 agent。默认假设是：这件事之前很可能已经被讨论、决定或踩过坑——先读记忆，再动手。
+
+                ## 记忆系统怎么分工
+                会话日志、span 摘要、work unit 固化和会话开场的规则/禁忌种子都由 dsh-hypatia-auto-memory 在后台完成，不要手工重复写这些。你负责两件事：在正确时机主动**检索**；在用户给出永久性规则、禁忌或纠正时**立即落库**。具体命令与查询配方在 hypatia-memory 技能里（用 skill 工具加载，CLI 细节见 hypatia 技能）——本段只规定纪律。
+
+                ## 检索纪律（下列时机是必须做的动作，不是建议）
+                1. 任务开始、制定计划前：先建立"已知决策 / 项目约定 / 已踩过的坑"的基线，再规划。
+                2. 每个里程碑或阶段边界：重新对齐一次，避免局部最优违背既有决策。
+                3. 任务中途发现新线索：出现陌生的内部名称或模块名、看不懂的报错、眼熟的 bug，或你意识到任务真正主题与开头不同时，立刻补查。
+                4. 重要或破坏性操作前：git commit / push、删除或覆盖文件、改配置、安装或升级插件与依赖、数据库迁移、发布或对外发送内容之前。
+                5. 用户提到历史时：例如"之前怎么定的""上次那个""为什么这么做"。
+                6. 长程任务周期性回顾：上下文已经很长，或目标已跨多轮续跑时，重新检索当前的关键主题。
+
+                检索质量要求：查询写成你想找的那个**概念**，不要照抄用户原话；语义检索用 `hypatia similar`，精确标识符用 `hypatia search`；始终排除运维层（`msg-`、`sum-`、`session-`、`hypatia-dream-run-` 开头，或带 `message`/`summary`/`session` 标签的行）；一次空结果不等于记忆里没有——换措辞、提高 `--limit` 再试。
+
+                ## 检索结果怎么用
+                查到既有决策就遵循它，并在回答里点明依据（条目名或结论）。记忆与当前代码或用户要求冲突时，明确说出冲突，以用户当前指令为准，并用 `supersedes` 语句把新结论落库——绝不删除旧条目。确实没有记录时，直接说明"记忆库中没有相关记录"，再按第一性原理推进，不要编造记忆内容。
+
+                ## 写入纪律
+                用户给出永久性规则、禁忌或纠正时立即写库（`rule` / `taboo` / `memory`，scope 用本项目的实际 scope）：先 `knowledge-get`，已存在就 `knowledge-update`，不存在才 `knowledge-create`，不要删除后重建。过程流水不要手工写。
+
+                ## 长程任务
+                复杂任务先用 todo_write 拆解并跟踪；跨轮目标用 goal 机制续跑，没有完成证据不要宣称完成。阶段收尾时把"值得留存的结论"落库，而不是把过程日志落库。
+              suffix: |-
+                你的工作目录是 {{cwd}}。记忆的检索与落库通过 bash 调用 hypatia CLI 完成，scope 归属由插件决定。
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: command-goal
+            name: '@deepseek-ai/dsh-command-goal'
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+              - id: tool-subagent-list-agents
+                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  modelSelectionSettings: true
+                  backgroundMode: continuable
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+                  backgroundMode: continuable
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000

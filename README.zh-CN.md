@@ -7,8 +7,9 @@
 （span 摘要、log₁₆(n) 归档级联、带裁决的工作单元抽取）——全部走**专用模型路由**，
 主会话零模型工作。
 
-写入是全自动的；**读取由 Agent 负责**，通过随包附带的 `hypatia-memory` 技能完成。
-这种分工是有意为之——见下文 *Recall*。
+写入是全自动的；**读取由 Agent 负责**，通过随包附带的 `hypatia-memory` 技能完成，
+检索纪律则由同样随包附带的 `smart-memory` 预设承载。这种分工是有意为之——见下文
+*Recall*。
 
 **本插件取代 `dsh-hypatia`。** 后者把写入留给 Agent，实际上并没有发生：在编写本
 插件的那个部署环境里，模型加载了协议，却在十五个会话中只有一个会话主动执行了
@@ -72,6 +73,52 @@ user）只在一层内打破平局。Agent 预设（`st`、`standard`、…）�
 目录名不够，因为 DSH 是按 frontmatter 里的 `name` 来命名技能的。启动告警会指出
 目录名。技能中心展示的是全局视图，所以它可能把本插件列为某技能的提供者，而会话
 实际加载的是磁盘拷贝。
+
+## Agent 预设：smart-memory（长程记忆）
+
+本插件包内置一个 Agent 预设。`cordis.patch.yml` 插入一行 `preset-smart-memory`
+声明 `@deepseek-ai/dsh-agent-preset`、`config.id: smart-memory`，因此是 profile 的
+bundle 层把它送进 Agent 预设选择器，与自带的 `standard`、`ptc`、`minimal` 并列：
+装上插件就有一个「记忆优先」的 Agent 可用，不必再手写 profile 补丁。
+
+**它承载的是分工里「读」的那一半，仅此而已。** 这里的写入本来就是自动的——日志
+记录、巩固、会话开场的规则种子。预设承载的是自动层做不到的纪律：**什么时候必须去
+查**（制定计划前、每个里程碑、出现陌生内部名称或眼熟的 bug 时、任何破坏性操作之前
+——commit、push、删除或覆盖、改配置、安装或升级、迁移、发布——用户提到历史时，以及
+长程任务中的周期性回顾），检索质量要求（查询写成概念而非用户原话；想法用
+`hypatia similar`，精确标识符用 `hypatia search`；始终排除运维层），以及唯一一条
+后台流程无法强制执行的写入规则：用户给出的永久性规则、禁忌或纠正立即落库，且对已存在
+条目用 `knowledge-update`，而不是删除后重建。
+
+人设规定的是*什么时候*，`hypatia-memory` 技能承载的是*怎么做*——命令、参数，以及
+shelf 与 scope 的规则。预设刻意不重述这套协议，也不挂载它：它只是提示词，不是第二个
+提供者，所以在工作涉及记忆时加载该技能。
+
+**工具集。** 即 `standard` 的花名册去掉 plan mode 组与 `present`（web profile 下
+46 个工具）。它的子插件——`@deepseek-ai/dsh-persona`、各 `dsh-tool-*` 行、
+`dsh-skill-filesystem`——来自 dsh 安装本身，**刻意不**作为本包的依赖；由 launcher
+提供。
+
+**这里不挂载插件自身的任何机制。** 预设不会启动第二个 collector、consolidator、
+recall 监听或自动批准。那些属于上面那行 `hypatia-auto-memory`，且无论会话跑在哪个
+预设下行为一致；因此用本预设的会话写记忆的方式与 `standard` 完全相同。
+
+**怎么选。** 在新会话的预设选择器里选「长程记忆」，或在 profile 自己的补丁文件里把它
+设为该界面的默认值：
+
+```yaml
+- id: agent-preset-registry
+  name: '@deepseek-ai/dsh-agent-preset-registry'
+  config:
+    selectedDefault: smart-memory
+```
+
+**替换手写的那一份。** 如果你在本预设随包分发之前自己声明过它，请删掉那份拷贝。包内的
+行刻意沿用 row id `preset-smart-memory`，而同名 row id 的两行会折叠为靠后的那一行
+——profile 的补丁文件在所有 bundle 层**之后**应用，所以残留的拷贝会取胜并遮蔽包内
+声明；插件管理器随后会把该行报成 `unaddressable`，因为同一个 id 出现了两个候选行。
+另一种失败是两行**不同** row id 声明同一个 `config.id`：registry 会用
+`Duplicate agent preset: smart-memory` 拒绝第二次注册。在原处留一段注释即可。
 
 ## 工作原理
 
@@ -518,7 +565,7 @@ shelf 清单本来就不是配置，而设置域现在只投影插件的 Config 
 ```
 dsh-hypatia-auto-memory/
 ├── package.json          # bundle + client manifest、依赖
-├── cordis.patch.yml      # 插入 id=hypatia-auto-memory 的 bundle 层
+├── cordis.patch.yml      # bundle 层：插件行 + smart-memory 预设
 ├── tsconfig.json         # 浏览器 TS/TSX 类型检查配置
 ├── tsconfig.build.json   # client bundle 的声明产物
 ├── tsdown.config.ts      # 浏览器 CJS 工厂构建
