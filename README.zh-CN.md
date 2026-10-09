@@ -30,12 +30,20 @@
 filters yes`）。
 
 本插件还需要 **dsh ≥ 0.1.7**，而且这个下限由 dsh 自己强制执行，不靠本 README：
-包里声明了 `peerDependencies["@deepseek-ai/dsh"]: ">=0.1.7-rc.1"`（同样的范围也写在
-`dsh.engines.dsh` 里，供展示），dsh 在安装 bundle 时、以及每次启动时，会把每个
-`@deepseek-ai/dsh*` peer 与自身版本比对——运行时太旧会直接拒绝安装，而不是加载一个
-面向它并不具备的 API 写成的插件；确实要接受风险时，用 `dsh plugin allow-version`
-授予精确版本豁免。该 peer 在 `peerDependenciesMeta` 里标为 optional，这样 npm 和
-profile 安装都不会把运行时本身拉成依赖：运行时由 launcher 提供。
+包里声明了
+`peerDependencies["@deepseek-ai/dsh"]: ">=0.1.7-rc.1 || ^0.2.0-rc.1 || ^0.2.1-alpha.1"`
+（同样的范围也写在 `dsh.engines.dsh` 里，供展示），dsh 在安装 bundle 时、以及每次启动时，
+会把每个 `@deepseek-ai/dsh*` peer 与自身版本比对——运行时太旧会直接拒绝安装，而不是加载
+一个面向它并不具备的 API 写成的插件；确实要接受风险时，用 `dsh plugin allow-version`
+授予精确版本豁免。范围把每条已发布通道逐一写出来，而不是只写一个开放下界：node-semver
+只在区间里存在同 `[major, minor, patch]` 的比较子时才接受预发布版，因此单写
+`>=0.1.7-rc.1` 其实一个 `0.2.x` 候选版都匹配不到。
+
+凡是运行中的 dsh 已经提供的 peer——`@deepseek-ai/dsh`、`@deepseek-ai/cordis`，以及
+`dsh-llm` / `dsh-tools` / `dsh-storage-domain` 三个服务——都在 `peerDependenciesMeta`
+里标为 `optional`，这样 npm 和 profile 安装都不会各自再拉一份：它们由 launcher 提供，
+而"需要共享实例的包存在两份"正是插件用错那一份的来源。dsh 会忽略这个标记——它的检查只读
+`peerDependencies`——所以上面的范围在安装时和启动时依旧生效。
 
 ```bash
 # 从本地 checkout 安装（开发）

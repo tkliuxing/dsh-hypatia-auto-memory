@@ -36,14 +36,25 @@ The first call logs which the binary offers
 
 The plugin also needs **dsh ≥ 0.1.7**, and dsh enforces that itself rather than
 this README: the package declares
-`peerDependencies["@deepseek-ai/dsh"]: ">=0.1.7-rc.1"` (the same range also
-sits under `dsh.engines.dsh` for display), and dsh checks every
-`@deepseek-ai/dsh*` peer against the running version when a bundle is installed
-and again at startup — an older runtime refuses the install instead of loading a
-plugin built for API it does not have, and `dsh plugin allow-version` grants an
-exact-version exemption when the risk is accepted deliberately. The peer is
-marked optional in `peerDependenciesMeta` so that neither npm nor a profile
-installation pulls the runtime in as a dependency: the launcher supplies it.
+`peerDependencies["@deepseek-ai/dsh"]: ">=0.1.7-rc.1 || ^0.2.0-rc.1 || ^0.2.1-alpha.1"`
+(the same range also sits under `dsh.engines.dsh` for display), and dsh checks
+every `@deepseek-ai/dsh*` peer against the running version when a bundle is
+installed and again at startup — an older runtime refuses the install instead of
+loading a plugin built for API it does not have, and `dsh plugin allow-version`
+grants an exact-version exemption when the risk is accepted deliberately. The
+range names each published channel explicitly rather than one open lower bound:
+node-semver admits a prerelease only when the range carries a comparator with the
+same `[major, minor, patch]`, so a bare `>=0.1.7-rc.1` matches no `0.2.x`
+release candidate at all.
+
+Every peer the running dsh already supplies — `@deepseek-ai/dsh`,
+`@deepseek-ai/cordis`, and the `dsh-llm` / `dsh-tools` / `dsh-storage-domain`
+services — is marked `optional` in `peerDependenciesMeta`, so that neither npm
+nor a profile installation pulls a copy of its own: the launcher supplies them,
+and two copies of a package whose instances must be shared is how a plugin ends
+up beside the wrong one. dsh ignores the flag — its check reads
+`peerDependencies` alone — so the ranges above are still enforced at install and
+at startup.
 
 ```bash
 # from a local checkout (development)
