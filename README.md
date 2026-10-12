@@ -2,7 +2,7 @@
 
 > 中文：[README.zh-CN.md](./README.zh-CN.md)
 
-Event-driven [Hypatia](https://github.com/tkliuxing/hypatia) memory for
+Event-driven [Hypatia](https://github.com/MarchLiu/hypatia) memory for
 [DSH](https://github.com/deepseek-ai/deepseek-harness): automatic conversation
 logging and background consolidation — span summaries, a log₁₆(n) archive
 cascade, and adjudicated work-unit extraction — all on a **dedicated model
@@ -380,7 +380,7 @@ agent/created ──▶ rules/taboos inject()
 - **Recall** preloads project/global rules and taboos at session start. Nothing
   else is pushed, except one line naming the shelf when it is not `default`, so
   the agent's own `hypatia` calls look where the plugin writes. Retrieval is the agent's job through the bundled skill, which
-  is what [`memory-nolinear.md`](https://github.com/tkliuxing/hypatia/blob/main/docs/memory-nolinear.md)
+  is what [`memory-nolinear.md`](https://github.com/MarchLiu/hypatia/blob/main/docs/memory-nolinear.md)
   prescribes for agents that hold context and can call tools; the previous
   per-turn injector also vetoed DSH's own runtime context section by returning
   from `agent/pre-step` without calling `next()`.
@@ -668,7 +668,7 @@ now only projects plugin Config forms.)
 Deliberate, and worth knowing before you rely on them:
 
 - **No topic-shift detection.**
-  [`memory-nolinear.md`](https://github.com/tkliuxing/hypatia/blob/main/docs/memory-nolinear.md)
+  [`memory-nolinear.md`](https://github.com/MarchLiu/hypatia/blob/main/docs/memory-nolinear.md)
   ranks topic switches as the strongest session-splitting signal, above task
   boundaries and time gaps. Detecting one needs a model call every turn, which contradicts this
   plugin's central trade-off (zero model work in the main session), so it is not
@@ -711,7 +711,7 @@ Deliberate, and worth knowing before you rely on them:
   one the first attempt intended.
 - **Two of the three bundled skills are vendored copies.** `hypatia` and
   `hypatia-dream` are copied from the [hypatia
-  repository](https://github.com/tkliuxing/hypatia)'s `skills/`, because a
+  repository](https://github.com/MarchLiu/hypatia)'s `skills/`, because a
   published package cannot reach outside itself. Nothing refreshes them: when
   the originals change upstream, copy them in by hand. `hypatia` is
   byte-identical. `hypatia-dream` carries two local patches, which a refresh

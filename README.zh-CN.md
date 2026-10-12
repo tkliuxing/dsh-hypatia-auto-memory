@@ -3,7 +3,7 @@
 > 本文件是 [README.md](./README.md) 的中文版。若两者不一致，以英文版为准。
 
 面向 [DSH](https://github.com/deepseek-ai/deepseek-harness) 的事件驱动
-[Hypatia](https://github.com/tkliuxing/hypatia) 记忆：自动记录对话、后台巩固
+[Hypatia](https://github.com/MarchLiu/hypatia) 记忆：自动记录对话、后台巩固
 （span 摘要、log₁₆(n) 归档级联、带裁决的工作单元抽取）——全部走**专用模型路由**，
 主会话零模型工作。
 
@@ -292,7 +292,7 @@ agent/created ──▶ rules/taboos inject()
 - **Recall** 在会话启动时预载项目/全局的 rules 和 taboos。除此之外什么都不推送，
   除了一行在 shelf 不是 `default` 时指明 shelf 名字，好让 Agent 自己的 `hypatia`
   调用去插件写入的地方找。检索由 Agent 通过随包技能完成，这正是
-  [`memory-nolinear.md`](https://github.com/tkliuxing/hypatia/blob/main/docs/memory-nolinear.md)
+  [`memory-nolinear.md`](https://github.com/MarchLiu/hypatia/blob/main/docs/memory-nolinear.md)
   为那些持有上下文、能调用工具的 Agent 所开出的方案；此前的每轮注入器还会因为从
   `agent/pre-step` 返回而不调用 `next()`，否决掉 DSH 自己的运行时上下文段。
 
@@ -525,7 +525,7 @@ shelf 清单本来就不是配置，而设置域现在只投影插件的 Config 
 刻意为之，依赖它们之前值得了解：
 
 - **没有话题切换检测。**
-  [`memory-nolinear.md`](https://github.com/tkliuxing/hypatia/blob/main/docs/memory-nolinear.md)
+  [`memory-nolinear.md`](https://github.com/MarchLiu/hypatia/blob/main/docs/memory-nolinear.md)
   把话题切换列为最强的会话切分信号，排在任务边界和时间间隔之上。检测它需要每个 turn
   一次模型调用，这与本插件的核心取舍（主会话零模型工作）相悖，所以未实现。任务边界
   （`turn/end` 原因）和会话关闭是被尊重的；一个覆盖三个无关话题的会话会被总结成一条。
@@ -553,7 +553,7 @@ shelf 清单本来就不是配置，而设置域现在只投影插件的 Config 
 - **级联在批次中途崩溃会移动分组边界。** 已连接的成员离开该层的未归档集合，所以
   重试会归档另一批。每样东西仍恰好归档一次；只是分组不再是第一次尝试想要的。
 - **三个随包技能里有两个是 vendored 拷贝。** `hypatia` 和 `hypatia-dream` 从
-  [hypatia 仓库](https://github.com/tkliuxing/hypatia) 的 `skills/` 拷贝而来，因为
+  [hypatia 仓库](https://github.com/MarchLiu/hypatia) 的 `skills/` 拷贝而来，因为
   已发布的包够不到自身之外。没有任何东西刷新它们：上游原件变了就手工拷进来。
   `hypatia` 逐字节相同。`hypatia-dream` 带两处本地补丁，刷新时必须重新打：
   - **Shelf。** 请求里没给 shelf 时，它用会话种子指明的那个，只有种子没指明时才用
