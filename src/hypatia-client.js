@@ -61,7 +61,7 @@ export function createHypatiaClient(ctx, config, { status, connection }) {
     if (!announced) {
       announced = true
       const yes = (flag) => (flag ? 'yes' : 'no')
-      status.info?.(`hypatia over ${usesMcp() ? 'mcp' : 'cli'}: no-embed ${yes(found.noEmbed)}, similar filters ${yes(found.similarFilters)}`)
+      status.info?.(`hypatia over ${usesMcp() ? 'mcp' : 'cli'}: no-embed ${yes(found.noEmbed)}, similar filters ${yes(found.similarFilters)}, delete ${yes(found.deleteKnowledge)}`)
     }
     return found
   }
@@ -71,6 +71,7 @@ export function createHypatiaClient(ctx, config, { status, connection }) {
     features,
     knowledgeGet: (...args) => via('knowledgeGet', args),
     knowledgeCreate: (...args) => via('knowledgeCreate', args),
+    knowledgeDelete: (...args) => via('knowledgeDelete', args),
     statementCreate: (...args) => via('statementCreate', args),
     search: (...args) => via('search', args),
     similar: (...args) => via('similar', args),

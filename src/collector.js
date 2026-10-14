@@ -137,6 +137,158 @@ export function countLoggableMessages(events) {
 }
 
 /**
+ * Event sources whose surface replacement means "the user took this branch
+ * back", as opposed to the producers that fold history without discarding it.
+ *
+ * Only a `replace` event carrying one of these `data.source.kind` values is a
+ * withdrawal (docs/rewind-memory-consistency.md §2.2–§2.4). The distinction is
+ * load-bearing, because every other producer's replacement is real history:
+ *
+ * - `compact-checkpoint` — DSH's own compaction, and `dsh-clear-mind`'s wrapper
+ *   around the same seam: the folded region is summarised for the model, never
+ *   discarded by the user.
+ * - `system-prompt` — the runtime-context snapshot (`system/message`) replaced
+ *   by its own next version; observed on a real log as seq 395/396.
+ * - `context-editor` — an edit or condensation, whose own restore action brings
+ *   the messages back.
+ *
+ * The list stays a whitelist on purpose. A denylist of "known non-withdrawal
+ * producers" fails open: the next plugin that uses `replace` for an edit would
+ * have its history deleted as if the user had taken it back. Members are added
+ * only after reading the producer's code and confirming the semantics, and each
+ * one gets a test in test/collector-withdrawn.test.mjs.
+ *
+ * Audited 2026-10-14: `dsh-rewind-plugin` (`dsh-rewind`) and the two rollback
+ * plugins that share `plugin:rollback` (`@domitor-syh/dsh-rollback`,
+ * `@nianchu/dsh-rollback`).
+ *
+ * The kind alone is not enough — a member also has to cite **exactly** the nodes
+ * it shadowed, see {@link withdrawnRanges}. `plugin:rollback` is the generic
+ * `plugin:<name>` spelling, so any future plugin calling itself `rollback`
+ * matches it too. Accepted knowingly: a rename shows up as a test failure,
+ * whereas a narrower string would silently stop matching the plugin it was
+ * written for.
+ */
+export const WITHDRAWAL_SOURCE_KINDS = Object.freeze(['dsh-rewind', 'plugin:rollback'])
+
+/**
+ * The withdrawn ranges a log slice contains, one entry per withdrawal marker.
+ *
+ * What a marker hid comes from its `sourceEventSeqs`, and the host only requires
+ * that list to **include** every shadowed node: citing extra, earlier seqs is
+ * legal (`assertSourceEventReferences` checks for `missing`, not equality).
+ * Everything cited here is deleted, so this reads exactly as far as the producer
+ * can be trusted — which is a per-member property, verified by reading each
+ * member of {@link WITHDRAWAL_SOURCE_KINDS}: `dsh-rewind-plugin` passes
+ * `[...plan.shadowedSeqs]` (its own `surface.slice(targetIndex)`), and the
+ * rollback plugins pass `seqsForStorage(shadowed)` — that same set, reordered
+ * for three or more seqs so the store's range encoder cannot compress it, which
+ * is why the **set**, not the order, is what this keeps.
+ *
+ * A new member needs that check too (docs/rewind-memory-consistency.md §2.4): a
+ * producer that also cited, say, the anchor it rewound to would have that message
+ * deleted here.
+ *
+ * @param {readonly any[]} events - a log slice that may contain markers. Callers
+ *   must read to `session.seq`, not merely to their own task range: a marker's
+ *   seq is greater than every seq it shadows, so it can sit past the range being
+ *   logged (docs/rewind-memory-consistency.md §3 fact 5).
+ * @returns {Array<{from: number, to: number, at: number, kind: string, seqs: Set<number>}>}
+ */
+export function withdrawnRanges(events) {
+  const ranges = []
+  for (const event of events ?? []) {
+    const op = event?.surfaceOp
+    if (op?.op !== 'replace') continue
+    // Only a user message can carry these markers. This also rules out the
+    // runtime-context snapshot (`system/message`) and the tool-result pruner
+    // (`tool/result`), both of which replace a single node with itself.
+    if (event.type !== 'user/message') continue
+    const kind = event.data?.source?.kind
+    if (typeof kind !== 'string' || WITHDRAWAL_SOURCE_KINDS.includes(kind) === false) continue
+    const cited = Array.isArray(event.sourceEventSeqs) ? event.sourceEventSeqs : []
+    const seqs = new Set(cited.filter((seq) => Number.isInteger(seq)))
+    // The host refuses an empty list on a replacement, so a marker citing nothing
+    // is one this build cannot read. Reading `[startSeq, endSeq]` instead would
+    // be a guess, and wrong in the case that matters most: those two numbers
+    // denote SURFACE order, so a slice containing a compaction checkpoint can
+    // have `startSeq > endSeq`.
+    if (seqs.size === 0) continue
+    ranges.push({ from: op.startSeq, to: op.endSeq, at: event.seq, kind, seqs })
+  }
+  return ranges
+}
+
+/** Every shadowed seq of every marker in the slice, as one lookup set. */
+export function withdrawnSeqs(events) {
+  const seqs = new Set()
+  for (const range of withdrawnRanges(events)) {
+    for (const seq of range.seqs) seqs.add(seq)
+  }
+  return seqs
+}
+
+/**
+ * The dense entry ordinal each of `seqs` was named by — `msg-<session>-<N>`.
+ *
+ * Same count as `countLoggableMessages`, over the same prefix, so a name derived
+ * here cannot drift from the name the span wrote: a withdrawal that arrives
+ * after its messages were logged has to retract them by name, and the only
+ * durable record of that name is the log itself.
+ *
+ * @param {readonly any[]} events - events covering the counting prefix, i.e. from
+ *   the inherited prefix through the shadowed seqs.
+ * @param {Set<number>} seqs - shadowed seqs, as `withdrawnSeqs` returns them.
+ * @param {number} [inherited] - size of the prefix a fork inherited, which
+ *   contributes no ordinals of its own.
+ * @returns {Map<number, number>} seq -> ordinal. A shadowed seq that is not a
+ *   loggable message is absent: it never had an entry.
+ */
+export function withdrawnOrdinals(events, seqs, inherited = 0) {
+  const ordinals = new Map()
+  if (seqs === undefined || seqs.size === 0) return ordinals
+  let index = 0
+  for (const event of events ?? []) {
+    if (event.seq < inherited || isLoggableMessage(event) === false) continue
+    if (seqs.has(event.seq)) ordinals.set(event.seq, index)
+    index += 1
+  }
+  return ordinals
+}
+
+/**
+ * What one log task must do about the withdrawals it can see — the whole
+ * decision, as a pure function of the log, so the executor only carries it out.
+ *
+ * A withdrawal has two faces, and they are told apart by position rather than by
+ * state: a shadowed message *inside* the range being written must not be written
+ * at all, while one *before* it was written by an earlier span and has to be
+ * retracted by name. Which of the two it is, is `seq < fromSeq`.
+ *
+ * @param {{log: readonly any[], prefix: readonly any[], fromSeq: number, inherited?: number}} input
+ *   `log` is the marker window: from the start of the range being written to the
+ *   end of the session log, because a marker's seq is greater than every seq it
+ *   shadows and a window cut at the task's own end can miss one. `prefix` is
+ *   `[inherited, fromSeq)`, where the messages an earlier span already wrote are
+ *   counted — the same prefix `baseIndex` counts, so a retraction names the entry
+ *   the span named.
+ * @returns {{seqs: Set<number>, retract: Map<number, number>}} `seqs` are the
+ *   shadowed seqs in the window (in-span members are matched against the items
+ *   about to be written); `retract` maps each shadowed seq *before* `fromSeq` to
+ *   the dense entry ordinal it was named by. Shadowed seqs that are not loggable
+ *   messages appear in neither: they never had an entry.
+ */
+export function withdrawalWork({ log, prefix, fromSeq, inherited = 0 }) {
+  const seqs = withdrawnSeqs(log)
+  if (seqs.size === 0) return { seqs, retract: new Map() }
+  const before = new Set([...seqs].filter((seq) => seq < fromSeq))
+  return {
+    seqs,
+    retract: before.size === 0 ? new Map() : withdrawnOrdinals(prefix, before, inherited),
+  }
+}
+
+/**
  * @param {{
  *   ctx: import('@deepseek-ai/cordis').Context,
  *   queue: ReturnType<import('./queue.js').createQueue>,

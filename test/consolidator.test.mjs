@@ -46,6 +46,22 @@ test('buildTranscript renders roles and folds tool outcomes', () => {
   assert.ok(!out.includes('ctx'))
 })
 
+test('buildTranscript leaves a withdrawn message out', () => {
+  // Retracting the entry is only half the job: a summary written from the
+  // withdrawn text would carry the discarded branch into the summary layer,
+  // where nothing can reach it afterwards.
+  const events = [
+    ev('user/message', 1, { source: { kind: 'user' }, content: [{ type: 'text', text: 'taken back' }] }),
+    ev('assistant/message', 2, { turn: 1, message: { content: [{ type: 'text', text: 'answer' }] } }),
+    ev('user/message', 3, { source: { kind: 'user' }, content: [{ type: 'text', text: 'the real question' }] }),
+  ]
+  const { text } = buildTranscript(events, { maxInputTokens: 10_000 }, new Date(), { withdrawn: new Set([1]) })
+
+  assert.ok(!text.includes('taken back'))
+  assert.ok(text.includes('the real question'))
+  assert.ok(text.includes('A: answer'), 'only the withdrawn message is skipped')
+})
+
 test('buildTranscript unwraps nested tool-result blocks', () => {
   // A real DSH tool/result nests the payload: the message carries one
   // `tool-result` block whose own `content` holds the tool's blocks.
@@ -334,6 +350,33 @@ test('execute advances the watermark only over the span it actually consolidated
   const linked = h.written.statements.filter(([, rel]) => rel === 'summary').map(([, , tail]) => tail)
   assert.equal(linked.length, watermark)
   assert.equal(linked[linked.length - 1], `msg-s1-${watermark - 1}`)
+})
+
+test('execute reads markers past its own span and leaves them out of the summary', async () => {
+  // The marker's seq is greater than every seq it shadows, so a span cut at the
+  // turn boundary can end before it arrives — and the summariser's own upper
+  // bound is `min(session.seq, lastLoggedSeq)`, which cuts it off too. Reading
+  // for markers to `session.seq` is what keeps that case from summarising a
+  // branch the user took back.
+  const events = [
+    ev('user/message', 0, { source: { kind: 'user' }, content: [{ type: 'text', text: 'taken back' }] }),
+    ev('user/message', 1, { source: { kind: 'user' }, content: [{ type: 'text', text: 'the real question' }] }),
+    ev('assistant/message', 2, { turn: 1, message: { content: [{ type: 'text', text: 'answer' }] } }),
+    // Plugin-sourced, so it is never a message of its own.
+    { ...ev('user/message', 3, { source: { kind: 'dsh-rewind' }, content: [{ type: 'text', text: '(empty message)' }] }), surfaceOp: { op: 'replace', startSeq: 0, endSeq: 0 }, sourceEventSeqs: [0] },
+    ev('user/message', 4, { source: { kind: 'user' }, content: [{ type: 'text', text: 'the re-ask' }] }),
+  ]
+  const h = makeExecuteHarness({ events, maxInputTokens: 10_000 })
+
+  // The span the log executor would hand over stops before the marker.
+  await h.consolidator.execute({ sessionId: 's1', fromSeq: 0, toSeq: 3, project: 'demo' })
+
+  assert.ok(!h.prompts[0].includes('taken back'), 'the withdrawn message reached the model')
+  assert.ok(h.prompts[0].includes('the real question'))
+  // `items` is by contract the entries the span produced: the withdrawn ordinal
+  // is counted but never cited, so no `summary` edge points at an absent entry.
+  const linked = h.written.statements.filter(([, rel]) => rel === 'summary').map(([, , tail]) => tail)
+  assert.deepEqual(linked, ['msg-s1-1', 'msg-s1-2'])
 })
 
 test('execute covers the whole span when it fits, and never ships raw secrets', async () => {

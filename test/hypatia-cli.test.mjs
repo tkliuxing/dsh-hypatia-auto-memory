@@ -81,7 +81,9 @@ function makeSubprocessPrinting(stdout) {
 
 /**
  * A subprocess stub answering each argv through `answer(argv)`, which returns
- * `{stdout, exitCode}`; every spawn is recorded.
+ * `{stdout, stderr, exitCode}`; every spawn is recorded. A non-zero exit whose
+ * answer names no stderr reads as clap's usage error, which is what most
+ * "old binary" cases need.
  */
 function makeSubprocessAnswering(answer) {
   const calls = []
@@ -89,12 +91,15 @@ function makeSubprocessAnswering(answer) {
     subprocess: {
       spawn({ argv }) {
         calls.push(argv.slice(1))
-        const { stdout = '', exitCode = 0 } = answer(argv.slice(1))
+        const outcome = answer(argv.slice(1))
+        const exitCode = outcome.exitCode ?? 0
         return {
           done: Promise.resolve({ exitCode }),
           collected: {
-            stdout: { readFrom: () => ({ text: stdout }) },
-            stderr: { readFrom: () => ({ text: exitCode === 0 ? '' : 'error: unexpected argument' }) },
+            stdout: { readFrom: () => ({ text: outcome.stdout ?? '' }) },
+            stderr: {
+              readFrom: () => ({ text: outcome.stderr ?? (exitCode === 0 ? '' : 'error: unexpected argument') }),
+            },
           },
         }
       },
@@ -107,6 +112,11 @@ function makeSubprocessAnswering(answer) {
 function helpFor(argv, { current }) {
   const [command] = argv
   if (argv[1] !== '--help') return undefined
+  // `knowledge-delete` is a capability rather than a flag: a binary from before
+  // hypatia #22 does not have the subcommand at all, so its `--help` exits 2.
+  if (command === 'knowledge-delete') {
+    return current ? 'Delete an entry\n\nUsage: hypatia knowledge-delete <NAME>\n' : undefined
+  }
   if (command === 'knowledge-create' || command === 'statement-create') {
     return `Create an entry\n\nOptions:\n  -d, --data <DATA>\n${current ? '      --no-embed  Keep this entry out of the vector index\n' : ''}  -s, --shelf <SHELF>\n`
   }
@@ -120,7 +130,7 @@ test('on a binary that lists them, writes carry --no-embed and similar carries -
   const { ctx, calls } = makeSubprocessAnswering((argv) => ({ stdout: helpFor(argv, { current: true }) ?? '[]' }))
   const cli = createHypatiaCli(ctx, { binaries: ['hypatia'] })
 
-  assert.deepEqual(await cli.features(), { noEmbed: true, similarFilters: true })
+  assert.deepEqual(await cli.features(), { noEmbed: true, similarFilters: true, deleteKnowledge: true })
   await cli.knowledgeCreate('msg-s1-0', { data: 'x', tags: ['message'], embed: false })
   await cli.statementCreate('msg-s1-0', 'belongTo', 'session-s1', { embed: false })
   await cli.knowledgeCreate('wu-x-1', { data: 'x', tags: ['memory'] })
@@ -133,8 +143,8 @@ test('on a binary that lists them, writes carry --no-embed and similar carries -
   assert.ok(!real[2].includes('--no-embed'), 'an entry that said nothing is embedded')
   assert.deepEqual(real[3].slice(-2), ['--exclude-tags', 'message,summary'])
   assert.ok(!real[4].includes('--exclude-tags'))
-  // The probe ran once — three `--help` spawns — however many calls read it.
-  assert.equal(calls.filter((argv) => argv[1] === '--help').length, 3)
+  // The probe ran once — four `--help` spawns — however many calls read it.
+  assert.equal(calls.filter((argv) => argv[1] === '--help').length, 4)
 })
 
 test('--no-embed is sent only when both write commands list it', async () => {
@@ -145,7 +155,7 @@ test('--no-embed is sent only when both write commands list it', async () => {
     return { stdout: helpFor(argv, { current: true }) ?? '[]' }
   })
   const cli = createHypatiaCli(ctx, { binaries: ['hypatia'] })
-  assert.deepEqual(await cli.features(), { noEmbed: false, similarFilters: true })
+  assert.deepEqual(await cli.features(), { noEmbed: false, similarFilters: true, deleteKnowledge: true })
   await cli.knowledgeCreate('msg-s1-0', { data: 'x', embed: false })
   assert.ok(!calls.at(-1).includes('--no-embed'))
 })
@@ -153,10 +163,14 @@ test('--no-embed is sent only when both write commands list it', async () => {
 test('on an older binary the flags are dropped rather than guessed at', async () => {
   // clap answers an unknown flag with a usage error INSTEAD of running the
   // command, so a guessed `--no-embed` would have failed every write.
-  const { ctx, calls } = makeSubprocessAnswering((argv) => ({ stdout: helpFor(argv, { current: false }) ?? '[]' }))
+  const { ctx, calls } = makeSubprocessAnswering((argv) => {
+    // A binary without the subcommand: clap answers a usage error (exit 2).
+    if (argv[0] === 'knowledge-delete') return { exitCode: 2 }
+    return { stdout: helpFor(argv, { current: false }) ?? '[]' }
+  })
   const cli = createHypatiaCli(ctx, { binaries: ['hypatia'] })
 
-  assert.deepEqual(await cli.features(), { noEmbed: false, similarFilters: false })
+  assert.deepEqual(await cli.features(), { noEmbed: false, similarFilters: false, deleteKnowledge: false })
   await cli.knowledgeCreate('msg-s1-0', { data: 'x', embed: false })
   await cli.similar('q', { limit: 5, excludeTags: ['message'] })
   const real = calls.filter((argv) => argv[1] !== '--help')
@@ -171,11 +185,39 @@ test('a probe that fails answers "neither" and is asked again next time', async 
     return { stdout: '[]' }
   })
   const cli = createHypatiaCli(ctx, { binaries: ['hypatia'] })
-  assert.deepEqual(await cli.features(), { noEmbed: false, similarFilters: false })
+  assert.deepEqual(await cli.features(), { noEmbed: false, similarFilters: false, deleteKnowledge: false })
   helpWorks = true
-  assert.deepEqual(await cli.features(), { noEmbed: true, similarFilters: true })
-  assert.deepEqual(await cli.features(), { noEmbed: true, similarFilters: true })
-  assert.equal(calls.filter((argv) => argv[1] === '--help').length, 6, 'failed probe repeated once, then cached')
+  assert.deepEqual(await cli.features(), { noEmbed: true, similarFilters: true, deleteKnowledge: true })
+  assert.deepEqual(await cli.features(), { noEmbed: true, similarFilters: true, deleteKnowledge: true })
+  assert.equal(calls.filter((argv) => argv[1] === '--help').length, 8, 'failed probe repeated once, then cached')
+})
+
+test('knowledgeDelete removes one entry, pinned to the shelf like every other call', async () => {
+  const { ctx, calls } = makeSubprocessAnswering(() => ({ exitCode: 0 }))
+  const cli = createHypatiaCli(ctx, { binaries: ['hypatia'] })
+
+  assert.equal(await cli.knowledgeDelete('msg-s1-3'), true)
+  assert.deepEqual(calls.at(-1), ['knowledge-delete', 'msg-s1-3', '--shelf', 'default'])
+})
+
+test('knowledgeDelete reports an already-missing name as false, not an error', async () => {
+  // A retraction is replayed whenever a span is: the marker is still in the log,
+  // so the entry being gone already is the ordinary second outcome.
+  const { ctx } = makeSubprocessAnswering((argv) => (argv[0] === 'knowledge-delete'
+    ? { exitCode: 1, stderr: "Error: not found: knowledge 'msg-s1-3'\n" }
+    : { stdout: '[]' }))
+  const cli = createHypatiaCli(ctx, { binaries: ['hypatia'] })
+
+  assert.equal(await cli.knowledgeDelete('msg-s1-3'), false)
+})
+
+test('a delete that fails for any other reason still throws', async () => {
+  const { ctx } = makeSubprocessAnswering((argv) => (argv[0] === 'knowledge-delete'
+    ? { exitCode: 1, stderr: 'Error: database is locked\n' }
+    : { stdout: '[]' }))
+  const cli = createHypatiaCli(ctx, { binaries: ['hypatia'] })
+
+  await assert.rejects(cli.knowledgeDelete('msg-s1-3'), { code: 'NONZERO_EXIT', exitCode: 1 })
 })
 
 test('a result row that merely contains the empty sentinel is not discarded', async () => {

@@ -13,9 +13,9 @@ function makeStub({
   searchRows = [],
   similarRows = [],
   failCreate = false,
-  features = { noEmbed: true, similarFilters: false },
+  features = { noEmbed: true, similarFilters: false, deleteKnowledge: true },
 } = {}) {
-  const calls = { get: [], create: [], statements: [], similar: [] }
+  const calls = { get: [], create: [], statements: [], similar: [], delete: [] }
   const stub = {
     calls,
     async features() {
@@ -31,6 +31,12 @@ function makeStub({
       calls.create.push({ name, entry })
       if (failCreate) throw new Error('create failed')
       existing.add(name)
+    },
+    async knowledgeDelete(name) {
+      calls.delete.push(name)
+      if (existing.has(name) === false) return false
+      existing.delete(name)
+      return true
     },
     async statementCreate(head, relation, tail, entry) {
       calls.statements.push({ head, relation, tail, entry })
@@ -60,7 +66,13 @@ function unitFixture(overrides = {}) {
 
 function makeStatus() {
   const counts = new Map()
-  return { count: (n, by = 1) => counts.set(n, (counts.get(n) ?? 0) + by), warn: () => {}, counts }
+  const warnings = []
+  return {
+    count: (n, by = 1) => counts.set(n, (counts.get(n) ?? 0) + by),
+    warn: (message) => warnings.push(message),
+    counts,
+    warnings,
+  }
 }
 
 test('writeMessage creates missing entries', async () => {
@@ -360,6 +372,77 @@ test('an adjudication failure degrades to storing without a relationship', async
   assert.equal(result.written, true)
   assert.equal(result.verdict, 'unrelated')
   assert.deepEqual(stub.calls.statements.map((s) => s.relation), ['is_a'])
+})
+
+test('a withdrawn message is not written, and one already stored is removed', async () => {
+  // The two faces of one withdrawal: nothing is created for a message the marker
+  // took out of the model's view, and an entry an earlier span already wrote is
+  // removed. What is retracted here is the raw evidence, never a semantic
+  // conclusion (docs/rewind-memory-consistency.md §4.3).
+  const stub = makeStub({ existing: new Set(['msg-s1-7']) })
+  const status = makeStatus()
+  const writer = createWriter(stub, { status })
+  const result = await writer.writeMessage({
+    sessionId: 's1', index: 7, markdown: '## Role\nuser', project: 'demo', withdrawn: true,
+  })
+
+  assert.equal(result.written, false)
+  assert.equal(result.retracted, true)
+  assert.equal(result.name, 'msg-s1-7')
+  assert.deepEqual(stub.calls.create, [])
+  assert.deepEqual(stub.calls.delete, ['msg-s1-7'])
+  assert.equal(status.counts.get('retracted'), 1)
+})
+
+test('a withdrawal of something never written costs one lookup and nothing else', async () => {
+  const stub = makeStub()
+  const status = makeStatus()
+  const writer = createWriter(stub, { status })
+  const result = await writer.retractMessage({ sessionId: 's1', index: 3 })
+
+  assert.equal(result.retracted, false)
+  assert.deepEqual(stub.calls.get, ['msg-s1-3'])
+  assert.deepEqual(stub.calls.delete, [], 'no blind delete: hypatia errors on a missing name')
+  assert.deepEqual(stub.calls.create, [])
+})
+
+test('a shelf that cannot delete skips the retraction and says so once', async () => {
+  // `knowledge-delete` arrived in hypatia #22. On an older shelf the withdrawal
+  // has to degrade to "not written again" — the range-anchored decision still
+  // holds — rather than failing the span.
+  const stub = makeStub({
+    existing: new Set(['msg-s1-7']),
+    features: { noEmbed: true, similarFilters: false, deleteKnowledge: false },
+  })
+  const status = makeStatus()
+  const writer = createWriter(stub, { status })
+  assert.equal((await writer.retractMessage({ sessionId: 's1', index: 7 })).retracted, false)
+  assert.equal((await writer.retractMessage({ sessionId: 's1', index: 8 })).retracted, false)
+
+  assert.deepEqual(stub.calls.delete, [])
+  assert.equal(status.warnings.length, 1, 'warned once for the run, not once per message')
+  assert.match(status.warnings[0], /no knowledge-delete/)
+})
+
+test('writeSessionNode skips withdrawn ordinals but still links the rest', async () => {
+  // The cursor counts every loggable message, withdrawn ones included, so the
+  // ordinals stay aligned with the log; only the edge is skipped — a `belongTo`
+  // edge to a message that has no entry is a dangling edge we need not create.
+  const stub = makeStub()
+  const writer = createWriter(stub, { status: makeStatus() })
+  const result = await writer.writeSessionNode({
+    sessionId: 's1', markdown: 'Storage rewrite session', project: 'demo',
+    linkFrom: 0, linkTo: 4, skip: new Set([1, 3]),
+  })
+
+  assert.equal(result.links, 2)
+  assert.deepEqual(
+    stub.calls.statements.map((s) => [s.head, s.relation, s.tail]),
+    [
+      ['msg-s1-0', 'belongTo', 'session-s1'],
+      ['msg-s1-2', 'belongTo', 'session-s1'],
+    ],
+  )
 })
 
 test('writeSessionNode creates the node and links the message range it is given', async () => {

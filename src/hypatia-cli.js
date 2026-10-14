@@ -183,13 +183,19 @@ export function createHypatiaCli(ctx, config) {
    * about `--no-embed` — they gained it together, but the answer is only worth
    * having if it is true of each command it gates.
    *
-   * @returns {Promise<{noEmbed: boolean, similarFilters: boolean}>}
+   * @returns {Promise<{noEmbed: boolean, similarFilters: boolean, deleteKnowledge: boolean}>}
    */
   async function probeFeatures() {
-    const [knowledge, statement, similar] = await Promise.all([
+    const [knowledge, statement, similar, remove] = await Promise.all([
       run(['knowledge-create', '--help']),
       run(['statement-create', '--help']),
       run(['similar', '--help']),
+      // Asked like the others, answered differently: a binary from before
+      // `knowledge-delete` existed (hypatia #22) prints a clap usage error and
+      // exits 2, and that is an answer ("cannot delete"), not a broken binary —
+      // the three required probes above still decide whether the client works at
+      // all. A withdrawal is therefore skipped rather than retracted there.
+      run(['knowledge-delete', '--help']),
     ])
     for (const result of [knowledge, statement, similar]) {
       if (result.exitCode !== 0) {
@@ -203,6 +209,7 @@ export function createHypatiaCli(ctx, config) {
     return {
       noEmbed: knowledge.stdout.includes('--no-embed') && statement.stdout.includes('--no-embed'),
       similarFilters: similar.stdout.includes('--exclude-tags'),
+      deleteKnowledge: remove.exitCode === 0,
     }
   }
 
@@ -216,7 +223,7 @@ export function createHypatiaCli(ctx, config) {
         // with its own error; the answer here only decides which flags that
         // call carries, and the conservative answer is none.
         featuresProbe = undefined
-        return { noEmbed: false, similarFilters: false }
+        return { noEmbed: false, similarFilters: false, deleteKnowledge: false }
       })
     }
     return featuresProbe
@@ -279,6 +286,31 @@ export function createHypatiaCli(ctx, config) {
       if (entry.scopes && entry.scopes.length > 0) argv.push('--scopes', entry.scopes.join(','))
       if (entry.embed === false && (await features()).noEmbed) argv.push('--no-embed')
       return runCreate(argv)
+    },
+
+    /**
+     * Remove one knowledge entry.
+     *
+     * Deleting a name that is already gone exits 1 with `Error: not found:
+     * knowledge '<name>'` — a normal outcome for a caller whose retraction may
+     * be replayed, so it is reported as `false` instead of thrown. Statements
+     * mentioning the name are deliberately kept by hypatia
+     * (`wu-knowledge-delete-retains-statements-7487bf50`), which is why a
+     * withdrawal leaves `belongTo` / `summary` edges behind and nothing here
+     * tries to remove them.
+     *
+     * @returns {Promise<boolean>} true when this call removed an entry.
+     */
+    async knowledgeDelete(name, shelf = shelfOf()) {
+      const result = await run(['knowledge-delete', name, '--shelf', shelf])
+      if (result.exitCode === 0) return true
+      const stderr = result.stderr.trim()
+      if (/^Error: not found:/.test(stderr)) return false
+      throw new HypatiaCliError(`hypatia exited ${result.exitCode}: knowledge-delete ${name}`, {
+        code: 'NONZERO_EXIT',
+        stderr: stderr.slice(0, 500),
+        exitCode: result.exitCode,
+      })
     },
 
     /**

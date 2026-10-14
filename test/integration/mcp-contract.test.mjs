@@ -111,6 +111,20 @@ test('hypatia mcp contracts the MCP transport relies on', options, async (t) => 
     assert.equal(await mcp.statementCreate('m-plain', 'belongTo', 'session-x', { scopes: ['proj'] }), false)
   })
 
+  await t.test('a withdrawal deletes on both transports, and a repeat is false', async () => {
+    // The retraction path (`writer.retractMessage`) leans on two things this
+    // asserts against the real binary: `knowledge-delete` exists, and deleting a
+    // name that is already gone is an outcome rather than an error — a replayed
+    // span retracts the same message again on every replay.
+    for (const [label, client] of [['mcp', mcp], ['cli', cli]]) {
+      const name = `withdrawn-${label}`
+      assert.equal(await client.knowledgeCreate(name, { data: 'taken back' }), true)
+      assert.equal(await client.knowledgeDelete(name), true, label)
+      assert.deepEqual(await client.knowledgeGet(name), { found: false }, label)
+      assert.equal(await client.knowledgeDelete(name), false, `${label}: already gone`)
+    }
+  })
+
   await t.test('an entry is stored the same whichever transport wrote it', async () => {
     const entry = { data: '- s1', tags: ['summary', 'summary 1'], scopes: ['proj', ''] }
     await mcp.knowledgeCreate('via-mcp', entry)
@@ -169,7 +183,7 @@ test('hypatia mcp contracts the MCP transport relies on', options, async (t) => 
   await t.test('both transports read the same features off the same binary', async () => {
     const viaMcp = await mcp.features()
     assert.deepEqual(viaMcp, await cli.features())
-    assert.deepEqual(Object.keys(viaMcp).sort(), ['noEmbed', 'similarFilters'])
+    assert.deepEqual(Object.keys(viaMcp).sort(), ['deleteKnowledge', 'noEmbed', 'similarFilters'])
   })
 
   await t.test('embed: false is stored the same whichever transport wrote it', async () => {

@@ -37,7 +37,9 @@ import { createHypatiaClient } from './hypatia-client.js'
 import { createHypatiaCli } from './hypatia-cli.js'
 import { createWriter } from './writer.js'
 import { TaskDeferredError, createQueue } from './queue.js'
-import { countLoggableMessages, createCollector, formatSpan } from './collector.js'
+import {
+  countLoggableMessages, createCollector, formatSpan, withdrawalWork, withdrawnOrdinals, withdrawnSeqs,
+} from './collector.js'
 import { createCascade } from './cascade.js'
 import { createConsolidator, PLUGIN_NAME } from './consolidator.js'
 import {
@@ -371,6 +373,18 @@ function applyCollect(ctx, configHandle, status) {
       // is replay-stable by construction and cannot drift out of sync.
       const inherited = session.inheritedEventCount ?? 0
       const baseIndex = countLoggableMessages(session.snapshotEvents(inherited, task.fromSeq))
+      // The marker window ends at `session.seq`, never at the task's own end: a
+      // marker's seq is greater than every seq it shadows, so it can sit past the
+      // range being logged — which is exactly the case where what it hid was
+      // written by an earlier run (docs/rewind-memory-consistency.md §3 fact 5).
+      // Everything else about the decision is collector.js's, where it is a pure
+      // function over the log and therefore testable without a session.
+      const { seqs: withdrawn, retract } = withdrawalWork({
+        log: session.snapshotEvents(task.fromSeq, session.seq ?? 0),
+        prefix: session.snapshotEvents(inherited, task.fromSeq),
+        fromSeq: task.fromSeq,
+        inherited,
+      })
       const formatted = formatSpan(events, {
         now: new Date(),
         maxAssistantChars: config.collector.maxAssistantChars,
@@ -379,13 +393,27 @@ function applyCollect(ctx, configHandle, status) {
         baseIndex,
         before: task.fromSeq > 0 ? session.snapshotEvents(task.fromSeq - 1, task.fromSeq)[0] : undefined,
       })
+      // A message the user took back is skipped, and one an earlier run wrote
+      // before the marker landed is retracted below. Anchored on the log range,
+      // never on "does the entry exist": a replayed span sees the same marker
+      // again, which is what keeps a retracted message from being written back.
+      const skipped = new Set()
       for (const item of formatted) {
+        const isWithdrawn = withdrawn.has(item.seq)
+        if (isWithdrawn) skipped.add(item.index)
         await writer.writeMessage({
           sessionId: task.sessionId,
           index: item.index,
           markdown: item.markdown,
           project: task.project,
+          withdrawn: isWithdrawn,
         })
+      }
+      // Retracting is idempotent, and the attempts stop once the watermark passes
+      // the marker's own seq, after which it leaves every later window too.
+      for (const index of retract.values()) {
+        skipped.add(index)
+        await writer.retractMessage({ sessionId: task.sessionId, index })
       }
       const linkTo = baseIndex + formatted.length
       // `belongTo` edges only exist once the session node does. Most sessions
@@ -397,8 +425,11 @@ function applyCollect(ctx, configHandle, status) {
           sessionId: task.sessionId,
           markdown: '',
           project: task.project,
+          // The cursor counts every loggable message, withdrawn ones included, so
+          // the ordinals stay aligned with the log; only the edges are skipped.
           linkFrom: before.lastBelongToIndex,
           linkTo,
+          skip: skipped,
         })
       }
       // Awaited: the task must not be reported done — and deleted — before the
@@ -432,12 +463,21 @@ function applyCollect(ctx, configHandle, status) {
       const inherited = session.inheritedEventCount ?? 0
       const current = state.progress.get(task.sessionId) ?? EMPTY_PROGRESS
       const linkTo = countLoggableMessages(session.snapshotEvents(inherited, current.lastLoggedSeq))
+      // This node links every message logged so far, so it owes the same skip set
+      // the log executor used — without it this node's own range would settle
+      // edges to messages that have no entry to link from. The markers are read
+      // from the whole log (the node is written once per session), and a marker
+      // anywhere in it can only hide earlier seqs: one slice, two passes.
+      const log = session.snapshotEvents(inherited, session.seq ?? 0)
+      const withdrawn = withdrawnSeqs(log)
+      const skip = new Set(withdrawnOrdinals(log, withdrawn, inherited).values())
       await writer.writeSessionNode({
         sessionId: task.sessionId,
         markdown,
         project: task.project,
         linkFrom: current.lastBelongToIndex,
         linkTo,
+        skip,
       })
       await advanceProgress(state.progress, task.sessionId, (progressRow) => ({
         hasSessionNode: 1,

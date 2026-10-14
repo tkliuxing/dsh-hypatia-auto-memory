@@ -15,7 +15,7 @@
  */
 
 import { absolutizeDates, blocksToText, eventDate, redactSecrets } from './content-policy.js'
-import { countLoggableMessages, isCompactionReplacement, isLoggableMessage } from './collector.js'
+import { countLoggableMessages, isCompactionReplacement, isLoggableMessage, withdrawnSeqs } from './collector.js'
 import { messageName, summaryName } from './writer.js'
 import { EMPTY_PROGRESS, advanceProgress } from './progress.js'
 import { TaskDeferredError } from './queue.js'
@@ -251,13 +251,15 @@ function consolidationInstruction(maxWorkUnits) {
  * @param {{maxInputTokens: number}} config
  * @param {Date} now - base for relative dates in an event that carries no
  *   timestamp; otherwise each line is resolved against its own event's time.
- * @param {{before?: any}} [context] - the event just ahead of the span, so a
- *   leading compaction replacement is recognised (it restates an old result).
+ * @param {{before?: any, withdrawn?: Set<number>}} [context] - the event just
+ *   ahead of the span, so a leading compaction replacement is recognised (it
+ *   restates an old result); and the seqs a withdrawal marker took out of the
+ *   model's view, which must not reach the summariser at all.
  * @returns {{text: string, lastSeq: number, complete: boolean}} `lastSeq` is the
  * seq of the last event included; `complete` is false when the budget forced
  * later events out of this run.
  */
-export function buildTranscript(events, config, now = new Date(), { before } = {}) {
+export function buildTranscript(events, config, now = new Date(), { before, withdrawn } = {}) {
   const bySeq = new Map(events.map((event) => [event.seq, event]))
   // Tool results cite their call by id; the readable name lives on the call.
   const toolNames = new Map()
@@ -272,6 +274,12 @@ export function buildTranscript(events, config, now = new Date(), { before } = {
   /** @type {Array<{seq: number, line: string}>} */
   const entries = []
   for (const event of events) {
+    // A withdrawn message never reaches the summariser. Retracting it is only
+    // half the job: a summary written from it would carry the branch the user
+    // took back into the summary layer, where no later delete can reach it,
+    // because summaries are immutable and named by span
+    // (docs/rewind-memory-consistency.md §4.4).
+    if (withdrawn?.has(event.seq) === true) continue
     if (event.type === 'user/message') {
       if (event.data?.source?.kind !== 'user') continue
       const text = clean(blocksToText(event.data?.content ?? []), event)
@@ -696,7 +704,13 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
     const events = session.snapshotEvents(fromSeq, task.toSeq)
     const now = new Date()
     const before = fromSeq > 0 ? session.snapshotEvents(fromSeq - 1, fromSeq)[0] : undefined
-    const { text: transcript, lastSeq, complete } = buildTranscript(events, consolidation, now, { before })
+    // Read the markers to `session.seq` rather than to `task.toSeq`: a marker's
+    // seq is greater than every seq it shadows, so this span's upper bound — and
+    // here that is `min(session.seq, lastLoggedSeq)` — can cut one off. Same
+    // visibility problem as the log executor (docs/rewind-memory-consistency.md
+    // §3 fact 5).
+    const withdrawn = withdrawnSeqs(session.snapshotEvents(fromSeq, session.seq ?? 0))
+    const { text: transcript, lastSeq, complete } = buildTranscript(events, consolidation, now, { before, withdrawn })
     if (transcript.trim() === '') {
       await advanceProgress(progress, task.sessionId, () => ({ lastConsolidatedSeq: task.toSeq }))
       return
@@ -829,7 +843,13 @@ export function createConsolidator({ queue, progress, sessions, llm, cli, writer
     const items = []
     for (const event of events) {
       if (!isLoggableMessage(event)) continue
-      if (event.seq < coveredToSeq) items.push(messageName(task.sessionId, itemIndex))
+      // A withdrawn message has no entry to cite, and `items` is by contract the
+      // list of entries the span actually produced (writer.js `writeSummary`), so
+      // the ordinal is still counted but the name is not asserted. Counting it
+      // keeps the remaining ordinals aligned with the log.
+      if (event.seq < coveredToSeq && withdrawn.has(event.seq) === false) {
+        items.push(messageName(task.sessionId, itemIndex))
+      }
       itemIndex += 1
     }
     await writer.writeSummary({

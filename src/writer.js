@@ -117,6 +117,52 @@ export function summaryName(sessionId, fromSeq, toSeq) {
  */
 export function createWriter(cli, { status, adjudicate }) {
   /**
+   * Whether this shelf can delete at all, warned about once.
+   *
+   * `knowledgeDelete` is a capability, not part of the baseline: a hypatia from
+   * before `knowledge-delete` existed (hypatia #22), or an MCP server without
+   * the tool, answers `features()` false. A withdrawal is then skipped instead
+   * of retracted — the message is still never written again, because the
+   * decision is anchored on the log range rather than on state this plugin
+   * keeps, so the only cost is one entry left for the user to remove by hand.
+   */
+  let warnedNoDelete = false
+  async function canRetract() {
+    const { deleteKnowledge } = await cli.features()
+    if (deleteKnowledge === false && warnedNoDelete === false) {
+      warnedNoDelete = true
+      status.warn('withdrawn messages cannot be retracted: this hypatia has no knowledge-delete, so they are skipped instead of removed')
+    }
+    return deleteKnowledge !== false
+  }
+
+  /**
+   * Take back one message the user withdrew.
+   *
+   * Get before delete, because the entry usually does not exist yet: a
+   * withdrawal is normally seen by the very span that would have written it.
+   * The get is also what makes a replay safe — `knowledge-delete` on a missing
+   * name is an error on the CLI and `NOT_FOUND` over MCP.
+   *
+   * Statements that mention the name are kept by hypatia on purpose
+   * (`wu-knowledge-delete-retains-statements-7487bf50`), so a withdrawal can
+   * leave a `belongTo` or `summary` edge pointing at an entry that is gone.
+   * That is the recorded, accepted graph semantic; nothing here removes them.
+   *
+   * @param {{sessionId: string, index: number}} entry
+   * @returns {Promise<{name: string, retracted: boolean}>}
+   */
+  async function retractMessage({ sessionId, index }) {
+    const name = messageName(sessionId, index)
+    const existing = await cli.knowledgeGet(name)
+    if (existing.found === false) return { name, retracted: false }
+    if ((await canRetract()) === false) return { name, retracted: false }
+    const removed = await cli.knowledgeDelete(name)
+    if (removed) status.count('retracted')
+    return { name, retracted: removed === true }
+  }
+
+  /**
    * Log one conversation message. Duplicates (same name already stored, e.g.
    * from a replayed task) are counted and skipped — the watermark must still
    * advance past them, which the queue does based on the resolved range.
@@ -128,9 +174,14 @@ export function createWriter(cli, { status, adjudicate }) {
    * stored and full-text searchable; only the vector is not made. On a binary
    * without `--no-embed` the flag is dropped by the transport.
    *
-   * @param {{sessionId: string, index: number, markdown: string, project: string}} entry
+   * @param {{sessionId: string, index: number, markdown: string, project: string,
+   *          withdrawn?: boolean}} entry - `withdrawn` marks a message a
+   *   withdrawal marker took out of the model's view: it is not written, and one
+   *   an earlier run already wrote is removed. The executor decides this from
+   *   the log (`withdrawnSeqs` in collector.js); here it is only carried out.
    */
-  async function writeMessage({ sessionId, index, markdown, project }) {
+  async function writeMessage({ sessionId, index, markdown, project, withdrawn = false }) {
+    if (withdrawn) return { ...(await retractMessage({ sessionId, index })), written: false }
     const name = messageName(sessionId, index)
     const existing = await cli.knowledgeGet(name)
     if (existing.found) {
@@ -201,18 +252,23 @@ export function createWriter(cli, { status, adjudicate }) {
    * without one is simply skipped rather than given an invented summary
    * (`skills/hypatia-memory/SKILL.md`, "do not fabricate session summaries").
    *
-   * hypatia has no `knowledge-update`, so a second title cannot replace the
-   * first; the original stands and the caller is told nothing was written.
+   * This writer never rewrites a session node: the plugin does not use
+   * `knowledge-update` on the log layer, so a second title cannot replace the
+   * first — the original stands and the caller is told nothing was written.
    *
    * Node and `belongTo` edges are written `embed: false`, as the messages are:
    * the node is bookkeeping for the traversal, and its title is what
    * `session/title` already gave DSH.
    *
    * @param {{sessionId: string, markdown: string, project: string,
-   *          linkFrom: number, linkTo: number}} entry - `[linkFrom, linkTo)` is
-   * the half-open range of message ordinals still needing a `belongTo` edge.
+   *          linkFrom: number, linkTo: number, skip?: Set<number>}} entry -
+   *   `[linkFrom, linkTo)` is the half-open range of message ordinals still
+   *   needing a `belongTo` edge. `skip` holds ordinals that must NOT be linked:
+   *   a message withdrawn from the model's view has no entry to link from, while
+   *   the cursor still advances past it, so the caller keeps counting every
+   *   loggable message (docs/rewind-memory-consistency.md §4.5).
    */
-  async function writeSessionNode({ sessionId, markdown, project, linkFrom = 0, linkTo = 0 }) {
+  async function writeSessionNode({ sessionId, markdown, project, linkFrom = 0, linkTo = 0, skip }) {
     const name = sessionNodeName(sessionId)
     const existing = await cli.knowledgeGet(name)
     if (existing.found) {
@@ -227,10 +283,13 @@ export function createWriter(cli, { status, adjudicate }) {
       await cli.knowledgeCreate(name, { data: markdown, tags: ['session'], scopes: [project], embed: false })
       status.count('written')
     }
+    let links = 0
     for (let index = linkFrom; index < linkTo; index += 1) {
+      if (skip?.has(index) === true) continue
       await cli.statementCreate(messageName(sessionId, index), 'belongTo', name, { scopes: [project], embed: false })
+      links += 1
     }
-    return { name, written: existing.found === false, links: Math.max(0, linkTo - linkFrom) }
+    return { name, written: existing.found === false, links }
   }
 
   /**
@@ -349,5 +408,5 @@ export function createWriter(cli, { status, adjudicate }) {
     return { name, written: existing.found === false, verdict, nearest }
   }
 
-  return { writeMessage, writeSummary, writeSessionNode, writeWorkUnit, findCandidates, messageName, summaryName }
+  return { writeMessage, retractMessage, writeSummary, writeSessionNode, writeWorkUnit, findCandidates, messageName, summaryName }
 }

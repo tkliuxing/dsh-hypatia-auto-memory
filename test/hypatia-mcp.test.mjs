@@ -175,6 +175,28 @@ test('one process serves consecutive calls, and the shelf is always named', asyn
   assert.deepEqual(fake.servers[0].calls.map((c) => c.args.shelf), ['work', 'work', 'other'])
 })
 
+test('knowledgeDelete reports a missing name as false, as on the CLI', async (t) => {
+  let exists = true
+  const fake = fakeSubprocess({
+    tools: [...REQUIRED_TOOLS, 'knowledge_delete'],
+    schemas: CURRENT_SCHEMAS,
+    onCall: (name, args) => {
+      if (name !== 'knowledge_delete') return ok({})
+      if (!exists) return toolError(`not found: knowledge '${args.name}'`)
+      exists = false
+      return ok({ name: args.name, deleted: true })
+    },
+  })
+  const { connection, client } = mcpClient(fake)
+  t.after(() => connection.dispose())
+  assert.equal(await client.knowledgeDelete('msg-s-1'), true)
+  assert.equal(await client.knowledgeDelete('msg-s-1'), false, 'already gone is not a failure')
+  assert.deepEqual(
+    fake.servers[0].calls.filter((c) => c.name === 'knowledge_delete').map((c) => c.args),
+    [{ name: 'msg-s-1', shelf: 'default' }, { name: 'msg-s-1', shelf: 'default' }],
+  )
+})
+
 test('a missing entry is {found: false}, as on the CLI', async (t) => {
   const fake = fakeSubprocess({ onCall: (_, args) => toolError(`not found: knowledge '${args.name}'`) })
   const { connection, client } = mcpClient(fake)
@@ -243,15 +265,25 @@ test('search, similar and query return the rows', async (t) => {
 
 /** Tool schemas as `hypatia mcp` lists them since #26 (embed) and #35 (similar filters). */
 const CURRENT_SCHEMAS = {
+  knowledge_delete: { type: 'object', additionalProperties: false, properties: { name: {}, shelf: {} } },
   knowledge_create: { type: 'object', additionalProperties: false, properties: { name: {}, data: {}, tags: {}, scopes: {}, embed: { type: 'boolean' }, shelf: {} } },
   statement_create: { type: 'object', additionalProperties: false, properties: { head: {}, relation: {}, tail: {}, data: {}, scopes: {}, embed: { type: 'boolean' }, shelf: {} } },
   similar: { type: 'object', additionalProperties: false, properties: { query: {}, target: {}, limit: {}, tags: {}, exclude_tags: { type: 'array' }, where: {}, shelf: {} } },
 }
 
 test('featuresOf reads the tool schemas', () => {
-  const listed = (schemas) => REQUIRED_TOOLS.map((name) => ({ name, inputSchema: schemas[name] }))
-  assert.deepEqual(featuresOf(listed(CURRENT_SCHEMAS)), { noEmbed: true, similarFilters: true })
-  assert.deepEqual(featuresOf(listed({})), { noEmbed: false, similarFilters: false })
+  const listed = (schemas, extra = []) => [
+    ...REQUIRED_TOOLS.map((name) => ({ name, inputSchema: schemas[name] })),
+    ...extra.map((name) => ({ name, inputSchema: schemas[name] })),
+  ]
+  assert.deepEqual(
+    featuresOf(listed(CURRENT_SCHEMAS, ['knowledge_delete'])),
+    { noEmbed: true, similarFilters: true, deleteKnowledge: true },
+  )
+  // `knowledge_delete` is a capability, not part of REQUIRED_TOOLS: a server
+  // that cannot delete still serves reads and writes.
+  assert.deepEqual(featuresOf(listed(CURRENT_SCHEMAS)), { noEmbed: true, similarFilters: true, deleteKnowledge: false })
+  assert.deepEqual(featuresOf(listed({})), { noEmbed: false, similarFilters: false, deleteKnowledge: false })
   // Both write tools must take `embed`; they arrived together, but a server
   // listing it on one only would reject it on the other.
   assert.equal(featuresOf(listed({ knowledge_create: CURRENT_SCHEMAS.knowledge_create })).noEmbed, false)
@@ -265,7 +297,7 @@ test('embed: false and excludeTags reach a server whose schemas list them', asyn
   const { connection, client } = mcpClient(fake)
   t.after(() => connection.dispose())
 
-  assert.deepEqual(await client.features(), { noEmbed: true, similarFilters: true })
+  assert.deepEqual(await client.features(), { noEmbed: true, similarFilters: true, deleteKnowledge: false })
   await client.knowledgeCreate('msg-s-1', { data: 'hi', tags: ['message'], embed: false })
   await client.statementCreate('msg-s-1', 'belongTo', 'session-s', { embed: false })
   await client.knowledgeCreate('wu-x', { data: 'lesson' })
@@ -290,7 +322,7 @@ test('a server whose schemas do not list them is never sent embed or exclude_tag
   const { connection, client } = mcpClient(fake)
   t.after(() => connection.dispose())
 
-  assert.deepEqual(await client.features(), { noEmbed: false, similarFilters: false })
+  assert.deepEqual(await client.features(), { noEmbed: false, similarFilters: false, deleteKnowledge: false })
   await client.knowledgeCreate('msg-s-1', { data: 'hi', embed: false })
   await client.similar('q', { limit: 5, excludeTags: ['message'] })
   const args = fake.servers[0].calls.map((c) => c.args)
@@ -527,11 +559,11 @@ test('features follow the transport: a binary without `mcp` is probed through it
   status.info = (message) => infos.push(message)
   const client = createHypatiaClient(fake.ctx, { binaries: ['hypatia'] }, { status })
   t.after(() => client.dispose())
-  assert.deepEqual(await client.features(), { noEmbed: true, similarFilters: true })
-  assert.deepEqual(await client.features(), { noEmbed: true, similarFilters: true })
+  assert.deepEqual(await client.features(), { noEmbed: true, similarFilters: true, deleteKnowledge: true })
+  assert.deepEqual(await client.features(), { noEmbed: true, similarFilters: true, deleteKnowledge: true })
   assert.equal(client.transport(), 'cli')
   assert.equal(warnings.length, 1)
-  assert.deepEqual(infos, ['hypatia over cli: no-embed yes, similar filters yes'], 'said once')
+  assert.deepEqual(infos, ['hypatia over cli: no-embed yes, similar filters yes, delete yes'], 'said once')
 })
 
 test('a server lacking a required tool is not used', async (t) => {

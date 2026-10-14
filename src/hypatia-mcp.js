@@ -58,7 +58,7 @@ export const REQUIRED_TOOLS = Object.freeze([
  * The names mirror hypatia-cli.js's `features()`.
  *
  * @param {Array<{name?: string, inputSchema?: {properties?: object}}>} tools
- * @returns {{noEmbed: boolean, similarFilters: boolean}}
+ * @returns {{noEmbed: boolean, similarFilters: boolean, deleteKnowledge: boolean}}
  */
 export function featuresOf(tools) {
   const accepts = (name, argument) => Object.hasOwn(
@@ -68,6 +68,11 @@ export function featuresOf(tools) {
   return {
     noEmbed: accepts('knowledge_create', 'embed') && accepts('statement_create', 'embed'),
     similarFilters: accepts('similar', 'exclude_tags'),
+    // Presence, not schema: `knowledge_delete` takes nothing this client does not
+    // already send. It is a capability rather than a REQUIRED_TOOL — a server
+    // that cannot delete is still a server worth writing memory to, and
+    // rejecting its whole MCP over it would push every call back to the CLI.
+    deleteKnowledge: tools.some((tool) => tool?.name === 'knowledge_delete'),
   }
 }
 
@@ -497,6 +502,23 @@ export function createHypatiaMcp(connection, config) {
       if (entry.data) args.data = entry.data
       if (entry.embed === false && (await connection.features()).noEmbed) args.embed = false
       return (await create('knowledge_create', lists(args, entry))) !== undefined
+    },
+
+    /**
+     * Remove one knowledge entry. A name that is already gone arrives as a tool
+     * error (`not found: knowledge '<name>'`, classified `NOT_FOUND`), which is
+     * a normal outcome for a replayable retraction rather than a failure.
+     *
+     * @returns {Promise<boolean>} true when this call removed an entry.
+     */
+    async knowledgeDelete(name, shelf = shelfOf()) {
+      try {
+        await invoke('knowledge_delete', { name, shelf })
+        return true
+      } catch (error) {
+        if (error instanceof HypatiaCliError && error.code === 'NOT_FOUND') return false
+        throw error
+      }
     },
 
     /**
