@@ -180,6 +180,15 @@ agent/created ──▶ rules/taboos inject()
   文本/图片内容的助手消息记录一份精简台账（`1. \`read\` ×5 — ✅ 1.2s total`）。无论
   哪种模式，**工具输出本身永远不会存入**日志层。
 
+- **被用户撤回的消息不会记入记忆。** `dsh-rewind-plugin`（`/rewind`）与两个
+  `plugin:rollback` 插件都靠追加一条 surface 替换，把消息从模型视野里藏起来；而日志
+  是 append-only 的，消息本身仍留在会话里。本插件读这条记录：被藏起来的消息不写，
+  早先的 flush 已经写出的则从 shelf 上删掉。来源是一份白名单，只收语义确实是"用户丢
+  弃了这个分支"的生产者——DSH 自己的压缩不在其中（它折叠的是用户保留的历史），编辑
+  类插件也不在其中。两个边界：回退之前已经写出的摘要仍带着被撤回的原文（摘要从不重
+  写），以及落在会话最后一次 flush 之后的回退完全看不到。见
+  `docs/rewind-memory-consistency.md`。
+
 - **日志层不嵌入。** `msg-*` 和 `session-*` 条目以及 `belongTo` / `summary` 边都以
   `embed: false` 写入（hypatia #26）：已存储、可全文检索、可被 JSE 找到，但不生成
   向量。协议设计了沿 `summary` 边从摘要精确下钻的召回方式，而不是按语义命中原始

@@ -225,6 +225,18 @@ agent/created ──▶ rules/taboos inject()
   do have text/image content. In either mode **tool outputs themselves are never
   stored** in the log layer.
 
+- **A message the user took back is not remembered.** `dsh-rewind-plugin`
+  (`/rewind`) and the two `plugin:rollback` plugins hide messages from the model
+  by appending a surface replacement; the log is append-only, so the messages
+  themselves stay in the session. This plugin reads that record: a hidden message
+  is not written, and one an earlier flush already wrote is deleted from the
+  shelf. The sources are a whitelist of producers verified to mean "the user
+  discarded this branch" — DSH's own compaction is not on it, because what it
+  folds is history the user keeps, and neither is any editor plugin. Two limits:
+  a summary written before the rewind still carries the withdrawn text
+  (summaries are never rewritten), and a rewind that lands after the session's
+  last flush is not seen at all. See `docs/rewind-memory-consistency.md`.
+
 - **The log layer is not embedded.** `msg-*` and `session-*` entries and the
   `belongTo` / `summary` edges are written `embed: false` (hypatia #26): stored,
   full-text indexed and reachable by JSE, but given no vector. The protocol has
