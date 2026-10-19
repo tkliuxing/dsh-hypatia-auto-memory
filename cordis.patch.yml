@@ -86,7 +86,7 @@
                 ## 长程任务
                 复杂任务先用 todo_write 拆解并跟踪；跨轮目标用 goal 机制续跑，没有完成证据不要宣称完成。阶段收尾时把"值得留存的结论"落库，而不是把过程日志落库。
               suffix: |-
-                你的工作目录是 {{cwd}}。记忆的检索与落库通过 bash 调用 hypatia CLI 完成，scope 归属由插件决定。
+                记忆的检索与落库通过 bash 调用 hypatia CLI 完成，scope 归属由插件决定。
           - id: agent-instructions
             name: '@deepseek-ai/dsh-agent-instructions'
             config:
