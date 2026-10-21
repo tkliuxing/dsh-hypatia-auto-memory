@@ -547,6 +547,12 @@ shelf 清单本来就不是配置，而设置域现在只投影插件的 Config 
 - **插件尚未使用 `knowledge-update`。** hypatia 在 #20 加入它（保留 `created_at`、
   丢弃旧向量并在下次 flush 时重新嵌入），但更旧的二进制没有，所以插件仍从不在原地
   编辑条目：第二个会话标题不会替换第一个，工作单元也从不重写。
+- **`knowledge-update --data=""` 会清空正文，且没有回滚。** hypatia 给什么存什么，
+  两种情况都打印 `Updated knowledge: <name>`——tags、scopes、`created_at` 全在，
+  文字没了；纯空白 payload 是同一个事故（在 4.0.0 上实测）。插件自己从不调用这个命令
+  （见上一条），但手写规则的 agent 会，而丢记忆的写法就是 `--data="$(cat …)"` 里的
+  文件从未生成。因此这道防线放在指令层：`hypatia-memory` 技能与 `smart-memory`
+  预设都要求先确认 payload 含非空白字符、再传、再用 `knowledge-get` 回读。
 - **重复的 `knowledge-create` 靠错误文本识别。** hypatia 对知识条目没有 upsert，所以
   `hypatia-cli.js` 识别 `UNIQUE constraint failed:` / `duplicate key` 使重放幂等。
   `statement-create` 自 hypatia #20 起自身幂等（重复执行退出 0 并打印 `Statement

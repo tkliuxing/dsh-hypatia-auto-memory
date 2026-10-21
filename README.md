@@ -699,6 +699,15 @@ Deliberate, and worth knowing before you rely on them:
   flush), but older binaries lack it, so the plugin still never edits an entry
   in place: a second session title does not replace the first, and a work unit
   is never rewritten.
+- **`knowledge-update --data=""` empties the body, and nothing rolls it back.**
+  hypatia stores what it is given and answers `Updated knowledge: <name>` either
+  way — tags, scopes and `created_at` survive, the text does not, and a
+  whitespace-only payload is the same accident (measured on 4.0.0). The plugin
+  never calls the command (see above), but an agent writing a rule by hand does,
+  and the way memory is lost is a `--data="$(cat …)"` whose file was never
+  written. The guard therefore lives in the instruction layer: the
+  `hypatia-memory` skill and the `smart-memory` preset both say to verify the
+  payload is non-blank, pass it, then read the entry back with `knowledge-get`.
 - **Duplicate `knowledge-create` is detected by error text.** hypatia has no
   upsert for knowledge entries, so `hypatia-cli.js` recognises
   `UNIQUE constraint failed:` / `duplicate key` to make a replay idempotent.

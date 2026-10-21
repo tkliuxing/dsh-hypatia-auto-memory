@@ -164,6 +164,18 @@ hypatia knowledge-create "<short-kebab-name>" \
   vector is regenerated on the next flush. An update that changes nothing
   prints `Knowledge unchanged: <name>` and writes nothing. Updating a missing
   entry exits 1.
+- **An empty `--data` erases the body, and nothing undoes it.** The classic
+  accident is `--data="$(cat /tmp/fact.md)"` whose file was never written: the
+  expansion is empty, hypatia still answers `Updated knowledge: <name>`, and the
+  entry keeps its tags, scopes and `created_at` while its body becomes nothing.
+  A whitespace-only payload (`"   "`) does the same, so `test -s` is NOT enough
+  — check for a non-blank character (`grep -q '[^[:space:]]' /tmp/fact.md`).
+  Write the payload to a file, verify it, pass `--data="$(cat /tmp/fact.md)"`,
+  then read it back with `hypatia knowledge-get "<exact-name>"` and confirm the
+  body is what you meant to say. There is no revision history: a wiped body can
+  only be rebuilt from the conversation or the session log. When the update is
+  not about the body, omit `--data` altogether — an omitted field keeps its
+  value; only a passed empty value clears one.
 - Pass only the fields you mean to change. `--scopes` **replaces** the stored
   scopes, with the syntax above: leave off the trailing comma and a global rule
   drops out of the session seed. `--tags ""` clears every tag, and an entry

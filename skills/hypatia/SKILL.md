@@ -139,6 +139,8 @@ hypatia knowledge-update <name> [-d "<data>"] [-t "<tags>"] [--synonyms "<csv>"]
 
 Only the fields you pass change. An omitted field keeps its stored value, and exactly `""` clears a field, such as `-t ""`; for tags, `","` or `" "` would store blank tags instead. `--scopes` replaces the stored scopes and is parsed as on create: end the list with a comma, such as `"q,"`, to include the global scope, or the entry drops out of global lookups. The entry keeps its `created_at`. Its old vector is discarded, and a new one is generated on the next flush, as after `knowledge-create`. Updating an entry that does not exist is an error. An update that changes nothing prints `Knowledge unchanged: <name>` and writes nothing.
 
+**`-d ""` / `--data=""` is destructive, not a no-op.** It replaces the body with the empty string and still prints `Updated knowledge: <name>`; tags, scopes and `created_at` survive, the text is gone, and there is no revision history to restore from (measured on 4.0.0). The usual accident is a command substitution over a file that was never written — `--data="$(cat /tmp/x.md)"` expands to empty — and `--data="   "` is the same accident once trimmed, which is why `test -s` is not a sufficient check. Verify the payload holds a non-blank character (`grep -q '[^[:space:]]' /tmp/x.md`), pass it, then read the entry back with `hypatia knowledge-get <name>`. When the body is not what changes, omit `-d` entirely.
+
 | User says | Command |
 |---|---|
 | "update Rust's description to mention memory safety" | `hypatia knowledge-update "Rust" -d "systems programming language with memory safety"` |
