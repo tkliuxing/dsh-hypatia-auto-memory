@@ -307,8 +307,10 @@ agent/created ──▶ rules/taboos inject()
 
 - **Auto-approve** 只回答 Agent 自己的 bash `hypatia` 调用的审批请求，而且仅限这些：
   可执行词必须是一个可信的 basename（去掉 `KEY=value` 前缀之后），并且命令在
-  **引号之外**不能有管道、重定向、串联或命令替换——一个引号内满是 `|` 和 `>` 的 JSE
-  参数仍然合格。其余都交给人类。插件自己的写入从不走这条路。
+  **单引号之外**不能有管道、重定向、串联或命令替换——一个引号内满是 `|` 和 `>` 的 JSE
+  参数仍然合格。双引号**不**能当作"已成字面量"：shell 会在双引号内展开 `$(…)` 和
+  反引号，所以 `hypatia query "$(id)"` 和任何带组合的命令一样交给人类。其余都交给
+  人类。插件自己的写入从不走这条路。
 
   Scope 是实测而非想当然：在 DSH 里，一个 bash 调用**只有**在沙箱拒绝、且模型带
   `sandbox_permissions` 重试时才会发起审批请求。检索（`query`、`search`、`list`、
@@ -522,7 +524,7 @@ shelf 清单本来就不是配置，而设置域现在只投影插件的 Config 
 | 改了 `shelf` 之后每次写入都失败 | shelf 没注册或没连接——启动时记录 `shelf "<name>" is not registered`。连接它（`hypatia connect <dir> --name <name>`）后重新保存设置（或重载 profile），或换一个 |
 | Agent 在 `default` 里搜，而插件写在别处 | 一份磁盘上的 `hypatia-memory`（见下）替换了随包技能，或 recall 被禁用，所以没有东西告诉 Agent 用哪个 shelf |
 | 手动乱改后出现重复 `msg-*` | 在 hypatia 里删掉该条目，并在 state domain 里把该会话的 `lastLoggedSeq` 调低——回填会重新创建它一次 |
-| Agent 自己的 `hypatia` 写入仍要审批 | `autoApprove: false`、命令在引号外有管道/重定向/串联、或首词不是 `binaries` 之一——按设计只回答纯调用。读取根本不会走到审批，所以那里没有要修的 |
+| Agent 自己的 `hypatia` 写入仍要审批 | `autoApprove: false`、命令在单引号外有管道/重定向/串联（双引号内的 `$(…)`/反引号也算）、或首词不是 `binaries` 之一——按设计只回答纯调用。读取根本不会走到审批，所以那里没有要修的 |
 | Agent 拿到了一份教它手动记录消息的记忆协议 | 另一个插件先注册了 `hypatia-memory`（profile 里还有 `dsh-hypatia`），或磁盘上有 `hypatia-memory`——通常是 `hypatia skill install --agent codex` 写的 `~/.agents/skills/hypatia-memory`。Agent 预设会在比插件更近的一层加载磁盘技能，所以它在会话里胜出，尽管技能中心可能列出本插件。删掉启动告警指出的那份拷贝 |
 | 不知道实际用了哪个模型 | 列表是优先级顺序：一个任务的第一次尝试就是 `consolidation.models` 的队首，重试则是它降级到的那条。每次尝试都落在 `~/.dsh/storages/hypatia_auto_memory_diag.json`（`model_calls`），带 purpose、provider/model、**实际发出的 `effort`**、outcome、耗时以及路由自己上报的 token 拆分——把同一个任务的几行按序读下来，就能确认备选确实被用上了，而 `effort` 是确认配置的思考档位真的生效了的依据。usage ledger 答不了这个问题——它只折算 Agent 的 turn（`assistant/message`），看不见插件直连的 `llm.stream`。`pending` 行表示调用仍在进行中，或进程在调用中途死了：记录在调用前先落盘、调用结束后回填 |
 | 配了 `reasoningEffort` 却像没生效 | 该路由没有声明这个档位，于是调用把它丢掉了，以免撞上核心的 `UNSUPPORTED_REASONING_EFFORT`。会有一条警告点名路由、值和该路由实际声明的档位，此后这些尝试的 `model_calls.effort` 是空的。卡片只提供模型声明的档位，所以这通常只发生在手改 profile、或把这条路由换成了别的模型之后 |

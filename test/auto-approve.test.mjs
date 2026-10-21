@@ -41,11 +41,58 @@ test('unquoted composition is', () => {
   }
 })
 
-test('only bash calls qualify', () => {
+test('a bash call qualifies; a tool that is not a shell never does', () => {
   assert.ok(isPureTrustedCall({ name: 'bash', arguments: { command: 'hypatia list' } }, BINARIES))
   assert.equal(isPureTrustedCall({ name: 'write', arguments: { command: 'hypatia list' } }, BINARIES), false)
   assert.equal(isPureTrustedCall({ name: 'bash', arguments: {} }, BINARIES), false)
   assert.equal(isPureTrustedCall(undefined, BINARIES), false)
+})
+
+test('double-quoted command substitution is composition too', () => {
+  // Regression: bash expands $(…) and backticks inside double quotes, so
+  // `hypatia query "$(id)"` does something other than talk to hypatia and must
+  // reach the human. While only single quotes counted as quoting for
+  // substitution, such a call was auto-approved.
+  assert.equal(hasShellComposition('hypatia search "$(touch /tmp/pwn)"'), true)
+  assert.equal(hasShellComposition('hypatia query "x$(rm -rf ~)y"'), true)
+  assert.equal(hasShellComposition('hypatia search "`whoami`"'), true)
+  assert.equal(hasShellComposition('hypatia search "a$(id)b$(id)"'), true)
+  assert.equal(hasShellComposition('hypatia search "a\\"$(id)"'), true, 'an escaped quote does not end the string')
+  assert.equal(
+    isPureTrustedCall({ name: 'bash', arguments: { command: 'hypatia query "$(id)"' } }, BINARIES),
+    false,
+  )
+})
+
+test('an escaped substitution is literal, and single quotes still neutralize', () => {
+  assert.equal(hasShellComposition('hypatia search \\$(id)'), false, '\\$ is a literal dollar sign')
+  assert.equal(hasShellComposition('hypatia search "\\$(id)"'), false)
+  assert.equal(hasShellComposition(`hypatia query '$(id)'`), false)
+  assert.equal(hasShellComposition("hypatia query '`id`'"), false)
+})
+
+test('a payload quoted for data stays prompt-free', () => {
+  // Why the matcher is quote-aware at all: JSE and --data arguments are
+  // routinely full of metacharacters, and prompting on those would make the
+  // agent's own writes unusable.
+  assert.equal(hasShellComposition('hypatia knowledge-create x --data="a | b > c"'), false)
+  assert.equal(hasShellComposition(`hypatia query '{"$knowledge":[["$gt","n",1]]}'`), false)
+})
+
+test('Windows executable shapes match the trusted binary', () => {
+  assert.ok(invokesTrustedBinary('hypatia.exe query x', BINARIES))
+  assert.ok(invokesTrustedBinary(String.raw`C:\Users\me\bin\hypatia.exe query x`, BINARIES))
+  assert.ok(invokesTrustedBinary(String.raw`C:\Users\me\bin\hypatia query x`, BINARIES))
+  assert.ok(invokesTrustedBinary('C:/Users/me/bin/hypatia.exe query x', BINARIES))
+  assert.equal(invokesTrustedBinary('evilhypatia.exe query x', BINARIES), false)
+  assert.equal(invokesTrustedBinary('evil.exe query x', BINARIES), false)
+})
+
+test('pwsh and powershell calls qualify, other tools never do', () => {
+  assert.ok(isPureTrustedCall({ name: 'pwsh', arguments: { command: 'hypatia knowledge-create x -d "y"' } }, BINARIES))
+  assert.ok(isPureTrustedCall({ name: 'powershell', arguments: { command: 'hypatia.exe knowledge-create x' } }, BINARIES))
+  assert.equal(isPureTrustedCall({ name: 'python', arguments: { command: 'hypatia query x' } }, BINARIES), false)
+  assert.equal(isPureTrustedCall({ name: 'pwsh', arguments: { command: 'hypatia query x; rm -rf /' } }, BINARIES), false)
 })
 
 /** Minimal waterfall emitter with cordis's prepend semantics. */

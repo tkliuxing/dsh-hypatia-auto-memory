@@ -400,9 +400,12 @@ agent/created ──▶ rules/taboos inject()
 - **Auto-approve** answers the approval request for the agent's own bash
   `hypatia` calls, and only those: the executable word must be a trusted
   basename (after `KEY=value` prefixes) and the command must carry no pipe,
-  redirect, chain or command substitution *outside quotes* — a JSE argument full
-  of `|` and `>` inside quotes still qualifies. Everything else goes to the
-  human. The plugin's own writes never take this path.
+  redirect, chain or command substitution *outside single quotes* — a JSE
+  argument full of `|` and `>` inside quotes still qualifies. Double quotes do
+  **not** make a payload inert: the shell expands `$(…)` and backticks inside
+  them, so `hypatia query "$(id)"` goes to the human like any other composed
+  command. Everything else goes to the human. The plugin's own writes never
+  take this path.
 
   Scope, measured rather than assumed: in DSH a bash call raises an approval
   request **only** when the sandbox denies it and the model retries with
@@ -668,7 +671,7 @@ now only projects plugin Config forms.)
 | Every write fails right after changing `shelf` | The shelf is not registered or not connected — startup logs `shelf "<name>" is not registered`. Connect it (`hypatia connect <dir> --name <name>`) and save the setting again (or reload the profile), or pick another |
 | The agent searches `default` while the plugin writes elsewhere | A disk copy of `hypatia-memory` (see below) replaced the bundled skill, or recall is disabled, so nothing told the agent which shelf to use |
 | Duplicate `msg-*` after weird manual edits | Delete the entry in hypatia and lower `lastLoggedSeq` for that session in the state domain — backfill recreates it once |
-| The agent's own `hypatia` write still asks for approval | `autoApprove: false`, the command pipes/redirects/chains outside quotes, or its first word is not one of `binaries` — only plain calls are answered, by design. Reads never reach approval at all, so nothing to fix there |
+| The agent's own `hypatia` write still asks for approval | `autoApprove: false`, the command pipes/redirects/chains outside single quotes (or substitutes `$(…)`/backticks even inside double ones), or its first word is not one of `binaries` — only plain calls are answered, by design. Reads never reach approval at all, so nothing to fix there |
 | The agent got a memory protocol that tells it to log messages by hand | Another plugin registered `hypatia-memory` first (`dsh-hypatia` still in the profile), or a `hypatia-memory` exists on disk — typically `~/.agents/skills/hypatia-memory`, written by `hypatia skill install --agent codex`. Agent presets load disk skills in a layer nearer than plugins, so it wins in sessions even though the skill center may list this plugin. Remove the copy the startup warning names |
 | Can't tell which model actually ran | The list is a priority order, so a task's first attempt names the head of `consolidation.models` and a retry names the route it degraded to. Each attempt lands in `~/.dsh/storages/hypatia_auto_memory_diag.json` (`model_calls`) with purpose, provider/model, the `effort` actually sent, outcome, duration and the route's own token split — reading one task's rows top-down is how a fallback is confirmed, and `effort` is how a configured thinking level is confirmed to have been honoured. The usage ledger cannot answer this — it folds agent turns (`assistant/message`) and never sees a plugin's direct `llm.stream`. A `pending` row means the call is still in flight, or the process died mid-call: the row is written before the call and settled after it |
 | A configured `reasoningEffort` seems to do nothing | The route does not declare that level, so the call drops it rather than risk the core's `UNSUPPORTED_REASONING_EFFORT`. One warning names the route, the value and what the route does declare; `model_calls.effort` then reads empty for those attempts. The card offers exactly the levels the model advertises, so this normally only happens after editing the profile by hand or pointing the route at a different model |

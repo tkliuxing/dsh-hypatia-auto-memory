@@ -92,7 +92,7 @@ DSH 对 MCP 服务器的描述很明确：
 
 > Each configured server contributes ordinary harness tools with cancellation, **permission checks**, **recorded results**…（DSH 上游 `docs/subsystems/mcp.md:7`）
 
-插件每次写入都要过审批——每个日志 span 一次落库（span 在回合边界切分，每条消息一条 `msg-*` 条目），外加每次固化——而后台没人点按钮。对照 autoApprove 的取向更能看出方向：它只放行 **Agent 自己的纯 `hypatia` bash 调用**，判据极窄——可执行词必须是受信 basename，且引号外不含 `& ; | < > \` \n $(`。理由写在源码注释里："一个会 pipe、redirect、chain 或 substitute 的命令，就是一个能做别的事而不只是跟 hypatia 说话的命令"（[`src/auto-approve.js:11-14`](../src/auto-approve.js#L11-L14)、[`:84-88`](../src/auto-approve.js#L84-L88)）。为后台写入申请一个更宽的授权，方向正好相反。
+插件每次写入都要过审批——每个日志 span 一次落库（span 在回合边界切分，每条消息一条 `msg-*` 条目），外加每次固化——而后台没人点按钮。对照 autoApprove 的取向更能看出方向：它只放行 **Agent 自己的纯 `hypatia` bash 调用**，判据极窄——可执行词必须是受信 basename，且单引号外不含 `& ; | < > \` \n $(`（双引号内也展开 `$(…)` 与反引号，因此同样算组合；`|`、`>` 在双引号内仍按字面放行）。理由写在源码注释里："一个会 pipe、redirect、chain 或 substitute 的命令，就是一个能做别的事而不只是跟 hypatia 说话的命令"（[`src/auto-approve.js:11-16`](../src/auto-approve.js#L11-L16)、[`:100`](../src/auto-approve.js#L100)）。为后台写入申请一个更宽的授权，方向正好相反。
 
 顺带一提：`recorded results` 意味着每次后台写入都会落进会话记录与工具台账——插件在后台做的事会开始出现在会话历史里。
 
